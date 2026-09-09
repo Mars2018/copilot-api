@@ -117,6 +117,8 @@ export const translateAnthropicMessagesToResponsesPayload = (
     )
   }
 
+  rewriteTrailingAssistantPrefill(input)
+
   const hasOriginalTools =
     Array.isArray(payload.tools) && payload.tools.length > 0
   const translatedTools = convertAnthropicTools(
@@ -168,6 +170,56 @@ export const translateAnthropicMessagesToResponsesPayload = (
   }
 
   return responsesPayload
+}
+
+const CONTINUE_PREFILL_INSTRUCTION =
+  "Continue the assistant's message exactly where it left off. Do not repeat, rephrase, summarize, or acknowledge the text already written -- output only the seamless continuation."
+
+// Anthropic clients (e.g. Claude Code) may end a conversation on an assistant
+// turn to constrain the reply ("prefill"); Claude backends resume from it.
+// Copilot's non-Claude backends (e.g. Gemini) enforce strict user/model turn
+// alternation and reject a request ending on a model turn with
+// invalid_message_role, so rewrite the prefill into an equivalent user
+// instruction instead. A trailing tool call is a genuine turn boundary, not a
+// prefill, so it is left untouched.
+const isTrailingAssistantMessage = (
+  item: ResponseInputItem | undefined,
+): item is ResponseInputMessage =>
+  isRecord(item)
+  && (item.type === undefined || item.type === MESSAGE_TYPE)
+  && item.role === "assistant"
+
+const rewriteTrailingAssistantPrefill = (
+  input: Array<ResponseInputItem>,
+): void => {
+  const last = input.at(-1)
+  if (!isTrailingAssistantMessage(last)) {
+    return
+  }
+
+  const prefillText = extractMessageText(last.content).trim()
+  input.pop()
+  input.push(
+    createMessage(
+      "user",
+      prefillText ?
+        `${CONTINUE_PREFILL_INSTRUCTION}\n\nText already written:\n${prefillText}`
+      : "Continue.",
+    ),
+  )
+}
+
+const extractMessageText = (
+  content: ResponseInputMessage["content"],
+): string => {
+  if (content === undefined) return ""
+  if (typeof content === "string") return content
+
+  return content
+    .flatMap((part) =>
+      isRecord(part) && typeof part.text === "string" ? [part.text] : [],
+    )
+    .join("")
 }
 
 interface TranslationState {
