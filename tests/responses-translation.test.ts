@@ -310,6 +310,80 @@ describe("translateAnthropicMessagesToResponsesPayload", () => {
     ])
   })
 
+  it("rewrites a trailing assistant text message into a continuation instruction", () => {
+    const result = translateAnthropicMessagesToResponsesPayload({
+      model: "gemini-3.8-flash",
+      max_tokens: 1024,
+      messages: [
+        {
+          role: "user",
+          content: "Write a haiku about the sea.",
+        },
+        {
+          role: "assistant",
+          content: "Waves crash on the shore",
+        },
+      ],
+    })
+
+    const input = result.input as Array<ResponseInputMessage>
+    expect(input).toHaveLength(2)
+    expect(input.at(-1)?.role).toBe("user")
+    expect(input.at(-1)?.content).toContain("Waves crash on the shore")
+    expect(input.at(-1)?.content).toContain("seamless continuation")
+  })
+
+  it("rewrites an empty trailing assistant message into a plain continue instruction", () => {
+    const result = translateAnthropicMessagesToResponsesPayload({
+      model: "gemini-3.8-flash",
+      max_tokens: 1024,
+      messages: [
+        {
+          role: "user",
+          content: "hello",
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "" }],
+        },
+      ],
+    })
+
+    const input = result.input as Array<ResponseInputMessage>
+    expect(input.at(-1)).toEqual({
+      type: "message",
+      role: "user",
+      content: "Continue.",
+    })
+  })
+
+  it("leaves a trailing assistant tool call untouched", () => {
+    const result = translateAnthropicMessagesToResponsesPayload({
+      model: "gemini-3.8-flash",
+      max_tokens: 1024,
+      messages: [
+        {
+          role: "user",
+          content: "What is the weather?",
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "call_weather",
+              name: "getWeather",
+              input: { location: "SF" },
+            },
+          ],
+        },
+      ],
+    })
+
+    const input = result.input as Array<{ type: string }>
+    expect(input.at(-1)?.type).toBe("function_call")
+  })
+
   it("ignores blank subagent agent_id", () => {
     const result = translateAnthropicMessagesToResponsesPayload(
       {
