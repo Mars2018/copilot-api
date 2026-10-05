@@ -149,7 +149,7 @@ export default function ProviderManagementPanel({
     )
 
   return (
-    <section className="mx-auto flex h-full min-h-0 w-full max-w-6xl flex-col overflow-hidden p-5 sm:p-6">
+    <section className="flex h-full min-h-0 w-full flex-col overflow-hidden px-5 pb-5 pt-3 sm:px-6 sm:pb-6">
       <div className="mb-5 flex shrink-0 items-start justify-between gap-4">
         <div>
           <h2 className="text-xl font-semibold tracking-tight text-ink">
