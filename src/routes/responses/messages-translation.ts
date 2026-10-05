@@ -161,6 +161,7 @@ export function translateResponsesToMessages(
   payload: ResponsesPayload,
   options: { model: string; publicModel?: string; toolCallTips?: boolean },
 ): ResponsesToMessagesTranslation {
+  removeWebSearchTool(payload)
   const registry = createToolRegistry(payload)
   const normalized = normalizeResponsesInput(payload.input)
   const outputFormatInstruction = buildOutputFormatInstruction(
@@ -405,6 +406,12 @@ function normalizeResponsesInput(
     compaction,
     input: [replayMessage, ...withoutTrigger.slice(latestCompactionIndex + 1)],
   }
+}
+
+function removeWebSearchTool(payload: ResponsesPayload): void {
+  if (!Array.isArray(payload.tools) || payload.tools.length === 0) return
+
+  payload.tools = payload.tools.filter((tool) => tool.type !== "web_search")
 }
 
 function createToolRegistry(payload: ResponsesPayload): MessagesToolRegistry {

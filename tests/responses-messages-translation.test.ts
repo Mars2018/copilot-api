@@ -481,6 +481,66 @@ describe("Responses Lite to Messages translation", () => {
     expect(decodeMessagesCompaction("not base64")).toBeNull()
   })
 
+  test("removes built-in web search while preserving other top-level tools", () => {
+    const tools: NonNullable<ResponsesPayload["tools"]> = [
+      { type: "function", name: "web_search", parameters: null, strict: null },
+      { type: "custom", name: "apply_patch" },
+      {
+        type: "namespace",
+        name: "web_search",
+        tools: [
+          { type: "function", name: "run", parameters: null, strict: null },
+        ],
+      },
+    ]
+    const result = translate({
+      input: "Hello",
+      tools: [{ type: "web_search" }, ...tools],
+    })
+
+    expect(result.originalPayload.tools).toEqual(tools)
+    expect(result.messagesPayload.tools?.map((tool) => tool.name)).toEqual([
+      "web_search",
+      "apply_patch",
+      "web_search__run",
+    ])
+  })
+
+  test("omits Messages tools and tool choice after removing the only tool", () => {
+    const result = translate({
+      input: "Hello",
+      tools: [{ type: "web_search" }],
+      tool_choice: "required",
+    })
+
+    expect(result.originalPayload.tools).toEqual([])
+    expect(result.originalPayload.tool_choice).toBe("required")
+    expect(result.messagesPayload.tools).toBeUndefined()
+    expect(result.messagesPayload.tool_choice).toBeUndefined()
+  })
+
+  test("still rejects web search tools in input.additional_tools", () => {
+    const payload: ResponsesPayload = {
+      model: "claude-sonnet-4.6",
+      input: [
+        {
+          role: "developer",
+          type: "additional_tools",
+          tools: [{ type: "web_search" }],
+        },
+        { role: "user", type: "message", content: "Hello" },
+      ],
+      tools: [{ type: "web_search" }],
+    }
+    const originalInput = structuredClone(payload.input)
+
+    expect(() =>
+      translateResponsesToMessages(payload, { model: payload.model }),
+    ).toThrow("does not support tool 'web_search'")
+    expect(payload.tools).toEqual([])
+    expect(payload.input).toEqual(originalInput)
+  })
+
   test("omits tool_choice without registered tools and preserves the request", () => {
     const choices: Array<NonNullable<ResponsesPayload["tool_choice"]>> = [
       "auto",
