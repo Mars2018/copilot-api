@@ -96,7 +96,12 @@ const zh: Locale = {
     providerType: 'Provider 类型',
     deviceCode: '授权码',
     deviceCodeUrl: '授权地址',
-    codexCallbackRequired: '授权未完成，可重试或返回重新开始',
+    codexAuthTimeout:
+      'Codex 授权已超过 2 分钟，请点击“添加或重新登录账号”重试。',
+    codexCallbackUnavailable:
+      '无法启动本地授权监听（端口 1455）。请关闭其他 Codex 登录流程后，点击“添加或重新登录账号”重试。',
+    codexLoginInProgress: 'Codex 登录正在进行中。',
+    codexFinishingAuth: '正在完成登录… 授权已完成，无法再取消。',
     copy: '复制',
     copied: '✓ 已复制',
     openAuthPage: '打开授权页面',
@@ -107,7 +112,9 @@ const zh: Locale = {
     confirmAdd: '确认添加',
     authFailed: '授权失败，请重试',
     tokenInvalid: 'Token 无效，请重试',
-    waitingCodexAuth: '等待 Codex 授权中…',
+    waitingCodexAuth: '请手动打开授权页面，在 2 分钟内完成 Codex 授权。',
+    cancelCodexAuth: '取消授权',
+    cancelling: '正在取消…',
     loginConsent: '登录即代表授权访问 Copilot API',
   },
   dashboard: {

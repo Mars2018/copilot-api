@@ -26,6 +26,7 @@ export interface AuthResult {
   mode?: DesktopAuthMode
   providers?: string[]
   error?: string
+  cancelled?: boolean
 }
 
 export interface AuthStatus extends AuthResult {
@@ -265,6 +266,9 @@ declare global {
       switchCodexAccount: (accountId: string) => Promise<AuthResult>
       removeCodexAccount: (accountId: string) => Promise<AuthResult>
       startCodexLogin: (input?: CodexLoginInput) => Promise<AuthResult>
+      cancelCodexLogin: () => Promise<boolean>
+      onCodexAuthUrl: (callback: (url: string) => void) => () => void
+      onCodexLoginSaving: (callback: () => void) => () => void
       logout: () => Promise<void>
       startServer: (
         port: number,

@@ -104,8 +104,13 @@ const en: Locale = {
     providerType: 'Provider type',
     deviceCode: 'Authorization code',
     deviceCodeUrl: 'Authorization URL',
-    codexCallbackRequired:
-      'Authorization did not finish. Retry or go back to start over',
+    codexAuthTimeout:
+      'Codex authorization timed out after 2 minutes. Choose “Add or sign in again” to retry.',
+    codexCallbackUnavailable:
+      'Could not start the local authorization listener on port 1455. Close other Codex sign-ins and choose “Add or sign in again” to retry.',
+    codexLoginInProgress: 'Codex sign-in is already in progress.',
+    codexFinishingAuth:
+      'Finishing sign-in… Authorization can no longer be cancelled.',
     copy: 'Copy',
     copied: '✓ Copied',
     openAuthPage: 'Open authorization page',
@@ -116,7 +121,10 @@ const en: Locale = {
     confirmAdd: 'Confirm',
     authFailed: 'Authorization failed, please try again',
     tokenInvalid: 'Invalid token, please try again',
-    waitingCodexAuth: 'Waiting for Codex authorization…',
+    waitingCodexAuth:
+      'Open the authorization page in your browser and finish within 2 minutes.',
+    cancelCodexAuth: 'Cancel authorization',
+    cancelling: 'Cancelling…',
     loginConsent: 'By signing in you authorize access to Copilot API',
   },
   dashboard: {

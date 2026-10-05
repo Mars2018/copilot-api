@@ -96,7 +96,10 @@ export interface Locale {
     providerType: string
     deviceCode: string
     deviceCodeUrl: string
-    codexCallbackRequired: string
+    codexAuthTimeout: string
+    codexCallbackUnavailable: string
+    codexLoginInProgress: string
+    codexFinishingAuth: string
     copy: string
     copied: string
     openAuthPage: string
@@ -108,6 +111,8 @@ export interface Locale {
     authFailed: string
     tokenInvalid: string
     waitingCodexAuth: string
+    cancelCodexAuth: string
+    cancelling: string
     loginConsent: string
   }
   dashboard: {

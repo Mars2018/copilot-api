@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import { ipcMain, shell, BrowserWindow } from 'electron'
 
 import { normalizeApiKeys } from '../../src/lib/request-auth'
+import { CodexOAuthError } from '../../src/lib/oauth/codex'
 import { loadModelsDevProviderOptions } from '../../src/lib/models-dev-cache'
 import { PATHS } from '../../src/lib/paths'
 import { invalidateConfigCache } from '../../src/lib/config-store'
@@ -57,6 +58,7 @@ import {
   writeServerKeysConfig,
 } from './server-auth-config'
 import type {
+  AuthResult,
   CodexLoginInput,
   DesktopAuthMode,
   DesktopProxySettings,
@@ -350,20 +352,86 @@ export function registerIpcHandlers(
     },
   )
 
+  let codexLoginController: AbortController | undefined
+  let codexLoginTask: Promise<AuthResult> | undefined
+  let codexLoginSaving = false
+  ipcMain.handle('auth:cancel-codex-login', () => {
+    if (!codexLoginController || codexLoginSaving) return false
+    codexLoginController.abort(new Error('Codex login cancelled'))
+    return true
+  })
+
   ipcMain.handle(
     'auth:start-codex-login',
-    async (_event, input: CodexLoginInput = {}) => {
-      try {
-        return await saveAndRefreshConfig(() =>
-          loginCodexForDesktop({
-            alias: input.alias,
-            callbackUrlOrCode: input.callbackUrlOrCode,
-            openUrl: (url) => shell.openExternal(url),
-          }),
-        )
-      } catch (err) {
-        return { success: false, mode: 'none', error: (err as Error).message }
+    async (_event, input: CodexLoginInput = {}): Promise<AuthResult> => {
+      const previousTask = codexLoginTask
+      if (
+        previousTask
+        && !codexLoginController?.signal.aborted
+        && !codexLoginSaving
+      ) {
+        return {
+          success: false,
+          mode: 'none',
+          error: await tMain('auth.codexLoginInProgress'),
+        }
       }
+      const controller = new AbortController()
+      codexLoginController = controller
+      codexLoginSaving = false
+      let saving = false
+      codexLoginTask = (async () => {
+        try {
+          await previousTask
+          controller.signal.throwIfAborted()
+          return await saveAndRefreshConfig(() =>
+            loginCodexForDesktop({
+              alias: input.alias,
+              callbackUrlOrCode: input.callbackUrlOrCode,
+              onAuthUrl: (url) => {
+                if (!mainWindow.isDestroyed() && !controller.signal.aborted) {
+                  mainWindow.webContents.send('auth:codex-url', url)
+                }
+              },
+              onSaving: () => {
+                saving = true
+                if (codexLoginController === controller) {
+                  codexLoginSaving = true
+                  if (!mainWindow.isDestroyed()) {
+                    mainWindow.webContents.send('auth:codex-saving')
+                  }
+                }
+              },
+              signal: controller.signal,
+            }),
+          )
+        } catch (err) {
+          if (
+            !saving
+            && controller.signal.aborted
+            && (err === controller.signal.reason
+              || (err instanceof Error && err.name === 'AbortError'))
+          ) {
+            return { success: false, mode: 'none', cancelled: true }
+          }
+          const error =
+            err instanceof CodexOAuthError ?
+              await tMain(
+                err.reason === 'callback_timeout' ?
+                  'auth.codexAuthTimeout'
+                : 'auth.codexCallbackUnavailable',
+              )
+            : (err as Error).message
+          return { success: false, mode: 'none', error }
+        } finally {
+          if (codexLoginController === controller) {
+            codexLoginController = undefined
+            codexLoginTask = undefined
+            codexLoginSaving = false
+          }
+        }
+      })()
+      return codexLoginTask
     },
   )
 

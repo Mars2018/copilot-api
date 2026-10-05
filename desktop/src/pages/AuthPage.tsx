@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type {
   AuthResult,
   CodexAccountSummary,
@@ -105,9 +105,23 @@ export default function AuthPage({ onBack, onSuccess }: AuthPageProps) {
   >([])
   const [codexAlias, setCodexAlias] = useState('')
   const [codexNotice, setCodexNotice] = useState('')
+  const [codexAuthUrl, setCodexAuthUrl] = useState('')
+  const [codexCancelling, setCodexCancelling] = useState(false)
+  const [codexSaving, setCodexSaving] = useState(false)
+  const codexLoginRef = useRef<{ unsubscribe: () => void } | null>(null)
   const [error, setError] = useState('')
   const [polling, setPolling] = useState(false)
   const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    return () => {
+      if (codexLoginRef.current) {
+        codexLoginRef.current.unsubscribe()
+        codexLoginRef.current = null
+        void window.electronAPI.cancelCodexLogin().catch(() => {})
+      }
+    }
+  }, [])
 
   const completeAuth = (result: AuthResult, fallbackError: string) => {
     if (result.success) {
@@ -170,6 +184,15 @@ export default function AuthPage({ onBack, onSuccess }: AuthPageProps) {
   }
 
   const handleBack = () => {
+    if (codexLoginRef.current) {
+      codexLoginRef.current.unsubscribe()
+      codexLoginRef.current = null
+      void window.electronAPI.cancelCodexLogin().catch(() => {})
+      setLoading(false)
+      setCodexAuthUrl('')
+      setCodexCancelling(false)
+      setCodexSaving(false)
+    }
     setView('default')
     setDeviceCode(null)
     setError('')
@@ -279,17 +302,41 @@ export default function AuthPage({ onBack, onSuccess }: AuthPageProps) {
   }
 
   const handleCodexOAuth = async () => {
+    if (codexLoginRef.current) return
     setView('codex-pending')
     setLoading(true)
     setError('')
     setCodexNotice('')
+    setCodexAuthUrl('')
+    setCopied(false)
+    setCodexCancelling(false)
+    setCodexSaving(false)
+    const attempt = { unsubscribe: () => {} }
+    codexLoginRef.current = attempt
 
     try {
+      attempt.unsubscribe = window.electronAPI.onCodexAuthUrl((url) => {
+        if (codexLoginRef.current === attempt) setCodexAuthUrl(url)
+      })
+      const unsubscribeUrl = attempt.unsubscribe
+      const unsubscribeSaving = window.electronAPI.onCodexLoginSaving(() => {
+        if (codexLoginRef.current === attempt) {
+          setCodexSaving(true)
+          setCodexCancelling(false)
+        }
+      })
+      attempt.unsubscribe = () => {
+        unsubscribeUrl()
+        unsubscribeSaving()
+      }
       const result = await window.electronAPI.startCodexLogin({
         alias: codexAlias.trim() || undefined,
       })
+      if (codexLoginRef.current !== attempt) return
       if (!result.success) {
-        setError(result.error ?? t('auth.authFailed'))
+        if (!result.cancelled) {
+          setError(result.error ?? t('auth.authFailed'))
+        }
         setView('codex-accounts')
         return
       }
@@ -300,14 +347,69 @@ export default function AuthPage({ onBack, onSuccess }: AuthPageProps) {
       }
 
       await loadCodexAccounts()
+      if (codexLoginRef.current !== attempt) return
       setCodexAlias('')
       setCodexNotice(t('auth.codexAccountRefreshed'))
       setView('codex-accounts')
     } catch (err) {
-      setError((err as Error).message)
-      setView('codex-accounts')
+      if (codexLoginRef.current === attempt) {
+        setError((err as Error).message)
+        setView('codex-accounts')
+      }
     } finally {
-      setLoading(false)
+      attempt.unsubscribe()
+      if (codexLoginRef.current === attempt) {
+        codexLoginRef.current = null
+        setLoading(false)
+        setCodexAuthUrl('')
+        setCodexCancelling(false)
+        setCodexSaving(false)
+      }
+    }
+  }
+
+  const handleCancelCodexOAuth = async () => {
+    const attempt = codexLoginRef.current
+    if (!attempt) return
+    setCodexCancelling(true)
+    try {
+      const cancelled = await window.electronAPI.cancelCodexLogin()
+      if (codexLoginRef.current !== attempt) return
+      if (cancelled) {
+        attempt.unsubscribe()
+        codexLoginRef.current = null
+        setView('codex-accounts')
+        setLoading(false)
+        setCodexAuthUrl('')
+        setCodexSaving(false)
+        setCodexCancelling(false)
+      } else {
+        setCodexSaving(true)
+        setCodexCancelling(false)
+      }
+    } catch (err) {
+      if (codexLoginRef.current === attempt) {
+        setError((err as Error).message)
+        setCodexCancelling(false)
+      }
+    }
+  }
+
+  const handleCopyCodexUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(codexAuthUrl)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch (err) {
+      setError((err as Error).message)
+    }
+  }
+
+  const handleOpenCodexUrl = async () => {
+    try {
+      await window.electronAPI.openUrl(codexAuthUrl)
+    } catch (err) {
+      setError((err as Error).message)
     }
   }
 
@@ -871,18 +973,46 @@ export default function AuthPage({ onBack, onSuccess }: AuthPageProps) {
           )}
 
           {view === 'codex-pending' && (
-            <div className="w-full max-w-[320px] flex flex-col gap-3 rounded-xl border border-line-soft bg-surface p-4 shadow-[0_12px_32px_rgba(0,0,0,0.08)]">
+            <div className="w-full max-w-[440px] flex flex-col gap-3 rounded-xl border border-line-soft bg-surface p-4 shadow-[0_12px_32px_rgba(0,0,0,0.08)]">
               <p className="text-center text-[13px] text-ink-faint animate-pulse">
-                {loading ?
-                  t('auth.waitingCodexAuth')
-                : t('auth.codexCallbackRequired')}
+                {codexSaving ?
+                  t('auth.codexFinishingAuth')
+                : t('auth.waitingCodexAuth')}
               </p>
+              {codexAuthUrl && !codexSaving && (
+                <>
+                  <label className="flex flex-col gap-1.5 text-[13px] text-ink-faint">
+                    {t('auth.deviceCodeUrl')}
+                    <textarea
+                      readOnly
+                      rows={3}
+                      value={codexAuthUrl}
+                      onFocus={(event) => event.currentTarget.select()}
+                      className="w-full resize-none rounded-lg border border-line bg-sunken px-3 py-2 font-mono text-[11px] text-ink-soft break-all"
+                    />
+                  </label>
+                  <button
+                    onClick={handleOpenCodexUrl}
+                    className="w-full rounded-lg bg-accent-strong py-2.5 text-[13px] font-semibold text-white hover:bg-accent-strong/90 transition-colors"
+                  >
+                    {t('auth.openAuthPage')}
+                  </button>
+                  <button
+                    onClick={handleCopyCodexUrl}
+                    className="w-full rounded-lg border border-line bg-surface py-2.5 text-[13px] font-semibold text-ink-soft hover:bg-sunken transition-colors"
+                  >
+                    {copied ? t('auth.copied') : t('auth.copy')}
+                  </button>
+                </>
+              )}
               <button
-                onClick={handleCodexOAuth}
-                disabled={loading}
-                className="w-full py-2.5 bg-accent-strong text-white text-[13px] font-semibold rounded-lg hover:bg-accent-strong/90 disabled:opacity-50 transition-colors"
+                onClick={handleCancelCodexOAuth}
+                disabled={codexCancelling || codexSaving}
+                className="w-full py-2.5 border border-line bg-surface text-ink-soft text-[13px] font-semibold rounded-lg hover:bg-sunken disabled:opacity-50 transition-colors"
               >
-                {loading ? t('auth.verifying') : t('auth.confirmAdd')}
+                {codexCancelling ?
+                  t('auth.cancelling')
+                : t('auth.cancelCodexAuth')}
               </button>
               <button
                 onClick={handleBack}

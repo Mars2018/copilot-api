@@ -44,7 +44,9 @@ interface ProviderConfigDependencies {
 export interface CodexDesktopLoginOptions {
   alias?: string
   callbackUrlOrCode?: string
-  openUrl: (url: string) => void | Promise<void>
+  onAuthUrl?: (url: string) => void
+  onSaving?: () => void
+  signal?: AbortSignal
 }
 
 interface CodexDesktopLoginDependencies {
@@ -286,6 +288,7 @@ export async function loginCodexForDesktop(
   options: CodexDesktopLoginOptions,
   dependencies: CodexDesktopLoginDependencies = {},
 ): Promise<AuthResult> {
+  options.signal?.throwIfAborted()
   const login = dependencies.loginCodex ?? loginCodex
   const persistCredentials =
     dependencies.persistCodexCredentials ?? persistCodexCredentials
@@ -293,14 +296,17 @@ export async function loginCodexForDesktop(
     dependencies.getEnabledProviders ?? getEnabledDesktopProviders
 
   const credentials = await login({
+    signal: options.signal,
     onAuth(info) {
-      void options.openUrl(info.url)
+      options.onAuthUrl?.(info.url)
     },
     onPrompt() {
       return Promise.resolve(options.callbackUrlOrCode?.trim() ?? '')
     },
   })
 
+  options.signal?.throwIfAborted()
+  options.onSaving?.()
   await persistCredentials(credentials, {
     activateAccount: true,
     alias: options.alias?.trim() || undefined,

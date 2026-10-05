@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, mock, test } from 'bun:test'
 
 import {
   configureDesktopProvider,
@@ -388,13 +388,17 @@ describe('desktop provider auth', () => {
     let enableProvider: boolean | undefined
     let activateAccount: boolean | undefined
     let persistedAlias: string | undefined
+    let savingAnnounced = false
 
     const result = await loginCodexForDesktop(
       {
         alias: ' Work ',
         callbackUrlOrCode: ' callback-code ',
-        openUrl: (url) => {
+        onAuthUrl: (url) => {
           openedUrl = url
+        },
+        onSaving: () => {
+          savingAnnounced = true
         },
       },
       {
@@ -410,6 +414,7 @@ describe('desktop provider auth', () => {
           }
         },
         persistCodexCredentials: (credentials, options) => {
+          expect(savingAnnounced).toBe(true)
           persistedAccessToken = credentials.accessToken
           enableProvider = options?.enableProvider
           activateAccount = options?.activateAccount
@@ -430,6 +435,45 @@ describe('desktop provider auth', () => {
       providers: ['codex'],
       success: true,
     })
+  })
+
+  test('does not start an already cancelled Codex login', async () => {
+    const controller = new AbortController()
+    controller.abort(new Error('Cancelled'))
+    const login = mock(() => Promise.reject(new Error('Unexpected login')))
+    await expect(
+      loginCodexForDesktop(
+        { signal: controller.signal },
+        { loginCodex: login },
+      ),
+    ).rejects.toThrow('Cancelled')
+    expect(login).not.toHaveBeenCalled()
+  })
+
+  test('does not persist credentials when Codex login was cancelled', async () => {
+    const controller = new AbortController()
+    const persist = mock(() => Promise.resolve())
+    const onSaving = mock(() => {})
+    await expect(
+      loginCodexForDesktop(
+        { signal: controller.signal, onSaving },
+        {
+          loginCodex: (options) => {
+            expect(options.signal).toBe(controller.signal)
+            controller.abort(new Error('Cancelled'))
+            return Promise.resolve({
+              accessToken: 'test-access',
+              refreshToken: 'test-refresh',
+              accountId: 'acct_test',
+              expiresAt: 0,
+            })
+          },
+          persistCodexCredentials: persist,
+        },
+      ),
+    ).rejects.toThrow('Cancelled')
+    expect(persist).not.toHaveBeenCalled()
+    expect(onSaving).not.toHaveBeenCalled()
   })
 
   test('lists safe Codex account summaries through desktop auth', () => {
