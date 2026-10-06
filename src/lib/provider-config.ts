@@ -29,7 +29,7 @@ export interface ResolvedProviderConfig {
   authTypeExplicit?: boolean
   pricingCurrency?: string
   models?: Record<string, ModelConfig>
-  codexModels?: Array<string>
+  agentsModels?: Array<string>
 }
 
 export function normalizeProviderBaseUrl(url: string): string {
@@ -194,7 +194,7 @@ export function getProviderConfig(name: string): ResolvedProviderConfig | null {
     authTypeExplicit: provider.authType !== undefined,
     pricingCurrency: normalizePricingCurrency(provider.pricingCurrency),
     models: provider.models,
-    codexModels: provider.codexModels,
+    agentsModels: provider.agentsModels,
   }
 }
 

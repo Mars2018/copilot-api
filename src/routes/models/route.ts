@@ -2,18 +2,27 @@ import { Hono } from "hono"
 
 import {
   listEnabledProviders,
+  getRawProviderConfig,
   resolveEffectiveProviderType,
   type CodexReasoningEffort,
   type ModelConfig,
   type ProviderType,
+  type ProviderConfig,
   type ResolvedProviderConfig,
 } from "~/lib/config"
 import {
   builtinProviderModelRegistry,
   getBuiltinProviderModelRecords,
 } from "~/lib/builtin-provider-models"
+import {
+  isClaudeUserAgent,
+  toClaudeDiscoveryModelId,
+} from "~/lib/claude-models"
 import { forwardError } from "~/lib/error"
-import { isGitHubCopilotEnabled } from "~/lib/github-copilot-provider"
+import {
+  GITHUB_COPILOT_PROVIDER,
+  isGitHubCopilotEnabled,
+} from "~/lib/github-copilot-provider"
 import { createHandlerLogger } from "~/lib/logger"
 import { stripInternalRequestHeaders } from "~/lib/internal-headers"
 import {
@@ -21,6 +30,8 @@ import {
   getOpencodeGoModelRecords,
 } from "~/lib/models-dev-cache"
 import { toClientModelId } from "~/lib/models"
+import { withModelDisplayName } from "~/lib/model-display-name"
+import { getProviderAgentModels } from "~/lib/provider-management"
 import { resolveProviderConfig } from "~/lib/provider-resolver"
 import { state } from "~/lib/state"
 import type { Model } from "~/lib/types/models"
@@ -48,21 +59,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizeCopilotModel(model: Model): ClientModel {
-  const capabilities = model.capabilities
-  const contextWindow = capabilities?.limits?.max_context_window_tokens ?? 0
   const clientId = toClientModelId(model.id)
-  const is1m = contextWindow >= 1_000_000
 
   return {
-    claude_model_id: is1m ? `${clientId}[1m]` : clientId,
-    ...model,
+    claude_model_id: `${clientId}[1m]`,
+    ...withModelDisplayName(model, GITHUB_COPILOT_PROVIDER),
     id: clientId,
     object: "model",
     type: "model",
     created: 0,
     created_at: EPOCH_ISO,
     owned_by: model.vendor,
-    display_name: model.name,
   }
 }
 
@@ -104,24 +111,19 @@ function normalizeProviderModel(
   }
 
   const id = `${provider}/${rawId}`
-  const name =
-    getStringField(model, "display_name")
-    ?? getStringField(model, "name")
-    ?? rawId
   const ownedBy =
     getStringField(model, "owned_by")
     ?? getStringField(model, "vendor")
     ?? provider
 
   return {
-    ...model,
+    ...withModelDisplayName(model, provider),
     id,
     object: getStringField(model, "object") ?? "model",
     type: getStringField(model, "type") ?? "model",
     created: typeof model.created === "number" ? model.created : 0,
     created_at: getStringField(model, "created_at") ?? EPOCH_ISO,
     owned_by: ownedBy,
-    display_name: name,
   }
 }
 
@@ -172,6 +174,7 @@ async function getProviderModelRecords(
 async function getProviderModels(
   provider: string,
   requestHeaders: Headers,
+  claudeClient: boolean,
 ): Promise<Array<ClientModel>> {
   try {
     const providerConfig = await resolveProviderConfig(provider)
@@ -179,12 +182,16 @@ async function getProviderModels(
       return []
     }
 
-    if (providerConfig.name === "codex") {
-      return normalizeProviderModels(providerConfig.name, getCodexModels().data)
-    }
-
-    const models = await getProviderModelRecords(providerConfig, requestHeaders)
-    return normalizeProviderModels(providerConfig.name, models)
+    const models =
+      providerConfig.name === "codex" ?
+        getCodexModels().data
+      : await getProviderModelRecords(providerConfig, requestHeaders)
+    return normalizeProviderModels(
+      providerConfig.name,
+      claudeClient ?
+        selectClaudeProviderModels(providerConfig, models)
+      : models,
+    )
   } catch (error) {
     if (provider === "codex") {
       logger.warn("models.provider.skip_error", {
@@ -197,20 +204,56 @@ async function getProviderModels(
     const fallbackModels = getFallbackProviderModelRecords(provider, "error", {
       error,
     })
-    return normalizeProviderModels(provider, fallbackModels)
+    return normalizeProviderModels(
+      provider,
+      claudeClient ?
+        selectClaudeProviderModels(
+          getRawProviderConfig(provider),
+          fallbackModels,
+        )
+      : fallbackModels,
+    )
   }
+}
+
+function selectClaudeProviderModels(
+  providerConfig: ProviderConfig | null,
+  models: Array<unknown>,
+): Array<unknown> {
+  const selection = getProviderAgentModels(providerConfig)
+  if (selection === undefined) return models
+  const modelsById = new Map(
+    models.flatMap((model) => {
+      if (!isRecord(model)) return []
+      const id = getStringField(model, "id")
+      return id ? [[id, model] as const] : []
+    }),
+  )
+  return selection.map((id) => modelsById.get(id) ?? { id })
 }
 
 async function getAggregatedModels(
   requestHeaders: Headers,
+  claudeClient: boolean,
 ): Promise<Array<ClientModel>> {
+  const copilotSelection =
+    claudeClient ?
+      getProviderAgentModels(getRawProviderConfig("github-copilot"))
+    : undefined
   const copilotModels =
     isGitHubCopilotEnabled() ?
-      (state.models?.data.map(normalizeCopilotModel) ?? [])
+      (state.models?.data
+        .filter(
+          (model) =>
+            copilotSelection === undefined
+            || copilotSelection.includes(model.id)
+            || copilotSelection.includes(toClientModelId(model.id)),
+        )
+        .map(normalizeCopilotModel) ?? [])
     : []
   const providerModelsByProvider = await Promise.all(
     listEnabledProviders().map((provider) =>
-      getProviderModels(provider, requestHeaders),
+      getProviderModels(provider, requestHeaders, claudeClient),
     ),
   )
 
@@ -616,13 +659,26 @@ modelRoutes.get("/", async (c) => {
       )
     }
 
+    const claudeClient = isClaudeUserAgent(c.req.header("user-agent"))
     const models = await getAggregatedModels(
       stripInternalRequestHeaders(c.req.raw.headers),
+      claudeClient,
     )
+
+    const clientModels =
+      claudeClient ?
+        models.map((model) => ({
+          ...model,
+          id: toClaudeDiscoveryModelId(model.id),
+          ...(typeof model.claude_model_id === "string" ?
+            { claude_model_id: toClaudeDiscoveryModelId(model.claude_model_id) }
+          : {}),
+        }))
+      : models
 
     return c.json({
       object: "list",
-      data: models,
+      data: clientModels,
       has_more: false,
     })
   } catch (error) {

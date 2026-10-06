@@ -27,6 +27,7 @@ import {
   resolveProviderConfigForModel,
 } from "~/lib/config"
 import { builtinProviderModelRegistry } from "~/lib/builtin-provider-models"
+import { fromClaudeDiscoveryModelId } from "~/lib/claude-models"
 import { logCodexRateLimitsEvent } from "~/lib/codex-rate-limit"
 import {
   applyDashScopePreserveThinkingDefault,
@@ -111,6 +112,7 @@ export async function handleProviderMessages(
 ): Promise<Response> {
   const provider = c.req.param("provider")
   const payload = await c.req.json<AnthropicMessagesPayload>()
+  payload.model = fromClaudeDiscoveryModelId(payload.model)
 
   const claudeAutoModel = getClaudeAutoModel()
   if (claudeAutoModel && isClaudeAutoModelRequest(payload)) {

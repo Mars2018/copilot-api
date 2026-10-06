@@ -14,22 +14,22 @@ import {
 import type { ProviderConfig } from '../../src/lib/config'
 
 describe('desktop provider auth', () => {
-  test.each([{ codexModels: [] }, { codexModels: ['deepseek-v4-pro'] }])(
+  test.each([{ agentsModels: [] }, { agentsModels: ['deepseek-v4-pro'] }])(
     'preserves quick provider Codex selection %j during reauthorization',
-    ({ codexModels }) => {
+    ({ agentsModels }) => {
       let written: ProviderConfig | undefined
       configureDesktopProvider(
         { provider: 'deepseek', apiKey: 'new-key' },
         {
           getEnabledProviders: () => ['deepseek'],
-          getRawProviderConfig: () => ({ codexModels: [...codexModels] }),
+          getRawProviderConfig: () => ({ agentsModels: [...agentsModels] }),
           setProviderConfig(_name, provider) {
             written = provider
             return provider
           },
         },
       )
-      expect(written?.codexModels).toEqual([...codexModels])
+      expect(written?.agentsModels).toEqual([...agentsModels])
       expect(written?.apiKey).toBe('new-key')
     },
   )
@@ -84,7 +84,7 @@ describe('desktop provider auth', () => {
       {
         getEnabledProviders: () => ['custom_deepseek'],
         getRawProviderConfig: () => ({
-          codexModels: ['deepseek-v4-pro'],
+          agentsModels: ['deepseek-v4-pro'],
           models: {
             'deepseek-v4-pro': {
               temperature: 0.2,
@@ -109,7 +109,7 @@ describe('desktop provider auth', () => {
     expect(writtenProviderConfig).toEqual({
       apiKey: 'custom-key',
       baseUrl: 'https://custom.example/api',
-      codexModels: ['deepseek-v4-pro'],
+      agentsModels: ['deepseek-v4-pro'],
       enabled: true,
       models: {
         'deepseek-v4-pro': {

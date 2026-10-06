@@ -8,6 +8,7 @@ import {
   resolveMappedModel,
 } from "~/lib/config"
 import { createFallbackModel } from "~/lib/provider-model"
+import { fromClaudeDiscoveryModelId } from "~/lib/claude-models"
 import { resolveConfiguredProviderModelAlias } from "~/lib/provider-resolver"
 import { getTokenCount } from "~/lib/tokenizer"
 import { handleProviderCountTokensForProvider } from "~/routes/provider/messages/count-tokens-handler"
@@ -90,7 +91,9 @@ async function countTokensViaAnthropic(
  */
 export async function handleCountTokens(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
-  anthropicPayload.model = resolveMappedModel(anthropicPayload.model)
+  anthropicPayload.model = resolveMappedModel(
+    fromClaudeDiscoveryModelId(anthropicPayload.model),
+  )
   normalizeSystemMessages(anthropicPayload)
 
   const providerModelAlias = await resolveConfiguredProviderModelAlias(

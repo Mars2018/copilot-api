@@ -295,6 +295,294 @@ afterEach(() => {
 })
 
 describe("model routes", () => {
+  test.each([
+    { path: "/v1/models", userAgent: "curl/8.0" },
+    { path: "/v1/models", userAgent: "claude-cli/2.1.258" },
+    { path: "/custom/v1/models", userAgent: "curl/8.0" },
+    { path: "/custom/v1/models", userAgent: "claude-cli/2.1.258" },
+  ])(
+    "adds provider names to display_name on $path for $userAgent",
+    async ({ path, userAgent }) => {
+      enabledProviders = ["custom"]
+      providerConfigs.custom = createProviderConfig(
+        "custom",
+        "https://custom.example",
+      )
+      fetchMock.mockImplementationOnce(() =>
+        Promise.resolve(
+          Response.json(
+            {
+              object: "list",
+              data: [
+                { id: "named-model", name: "Readable model" },
+                { id: "id-only" },
+                {
+                  id: "labeled-model",
+                  name: "Other name",
+                  display_name: "Upstream label",
+                },
+                { id: "empty-label", name: "Other name", display_name: "" },
+                { id: "null-label", name: "Other name", display_name: null },
+              ],
+              has_more: false,
+            },
+            {
+              headers: {
+                "x-provider-meta": "kept",
+                etag: 'W/"upstream-models"',
+              },
+            },
+          ),
+        ),
+      )
+      const response = await createApp().request(path, {
+        headers: { "user-agent": userAgent },
+      })
+      expect(response.status).toBe(200)
+      const body = (await response.json()) as {
+        data: Array<{ display_name: unknown }>
+      }
+      expect(body.data.map((model) => model.display_name)).toEqual([
+        "Readable model (custom)",
+        "id-only (custom)",
+        "Upstream label (custom)",
+        "",
+        null,
+      ])
+      if (path.startsWith("/custom/")) {
+        expect(response.headers.get("x-provider-meta")).toBe("kept")
+        expect(response.headers.has("etag")).toBe(false)
+      }
+    },
+  )
+
+  test("identifies Copilot in both generated and upstream display names", async () => {
+    state.models = createCopilotModels(["gpt-labeled", "gpt-unlabeled"])
+    Object.assign(state.models.data[0], {
+      display_name: "Existing Copilot label",
+    })
+    state.models.data[1].name = "Readable Copilot name"
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "claude-cli/2.1.258" },
+    })
+    const body = (await response.json()) as {
+      data: Array<{ display_name: string }>
+    }
+    expect(body.data.map((model) => model.display_name)).toEqual([
+      "Existing Copilot label (github-copilot)",
+      "Readable Copilot name (github-copilot)",
+    ])
+    expect(state.models.data[1]).not.toHaveProperty("display_name")
+  })
+
+  test("preserves the upstream body and cache validators when display names already identify the provider", async () => {
+    providerConfigs.custom = createProviderConfig(
+      "custom",
+      "https://custom.example",
+    )
+    const body =
+      '{ "data": [{"id":"model","display_name":"Already labeled (custom)"}] }'
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(
+        new Response(body, {
+          headers: {
+            "content-type": "application/json",
+            etag: 'W/"upstream-models"',
+          },
+        }),
+      ),
+    )
+    const response = await createApp().request("/custom/v1/models")
+    expect(await response.text()).toBe(body)
+    expect(response.headers.get("etag")).toBe('W/"upstream-models"')
+  })
+
+  test("does not apply the Codex 1 MiB limit to Claude discovery", async () => {
+    state.models = createCopilotModels(["glm-5.3-flash"])
+    state.models.data[0].name = "a".repeat(1024 * 1024)
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "claude-cli/2.1.258" },
+    })
+    expect(response.status).toBe(200)
+    const body = await response.text()
+    expect(body).toContain('"id":"my-claude-glm-5.3-flash[1m]"')
+    expect(Buffer.byteLength(body)).toBeGreaterThan(1024 * 1024)
+  })
+
+  test.each([
+    { body: "upstream error", status: 502 },
+    { body: "invalid json", status: 200 },
+    { body: '{"models":[]}', status: 200 },
+  ])(
+    "preserves provider model errors and unrecognized responses: %j",
+    async ({ body, status }) => {
+      providerConfigs.custom = createProviderConfig(
+        "custom",
+        "https://custom.example",
+      )
+      fetchMock.mockImplementationOnce(() =>
+        Promise.resolve(new Response(body, { status })),
+      )
+      const response = await createApp().request("/custom/v1/models")
+      expect(response.status).toBe(status)
+      expect(await response.text()).toBe(body)
+    },
+  )
+
+  test.each([
+    {
+      userAgent: "claude-cli/2.1.258 (external, cli)",
+      contextWindow: 200_000,
+    },
+    {
+      userAgent: "vscode_claude_code/2.1.258 (external, sdk-ts)",
+      contextWindow: 1_000_000,
+    },
+    { userAgent: "Claude-Code/2.1.258", contextWindow: undefined },
+  ])(
+    "adapts discovery IDs only for Claude user agent $userAgent with context $contextWindow",
+    async ({ userAgent, contextWindow }) => {
+      state.models = createCopilotModels(["gpt-6-luna", "claude-opus-4.8"])
+      for (const model of state.models.data) {
+        model.capabilities.limits.max_context_window_tokens = contextWindow
+      }
+      enabledProviders = ["opencode-go"]
+      providerConfigs["opencode-go"] = createProviderConfig(
+        "opencode-go",
+        "https://unused.example",
+      )
+
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": userAgent },
+      })
+      expect(response.status).toBe(200)
+      const body = (await response.json()) as {
+        data: Array<{ id: string; claude_model_id?: string; type: string }>
+        has_more: boolean
+      }
+      expect(body.has_more).toBe(false)
+      expect(body.data[0]).toMatchObject({
+        id: "my-claude-gpt-6-luna[1m]",
+        claude_model_id: "my-claude-gpt-6-luna[1m]",
+        type: "model",
+      })
+      expect(body.data[1]).toMatchObject({
+        id: "claude-opus-4-8[1m]",
+        claude_model_id: "claude-opus-4-8[1m]",
+      })
+      expect(body.data.every((model) => model.id.endsWith("[1m]"))).toBe(true)
+      expect(body.data.map((model) => model.id)).toContain(
+        "opencode-go/my-claude-glm-5.3-flash[1m]",
+      )
+      expect(
+        body.data.find(
+          (model) => model.id === "opencode-go/my-claude-glm-5.3-flash[1m]",
+        ),
+      ).toMatchObject({ display_name: "GLM-5.3-Flash (opencode-go)" })
+      expect(state.models.data.map((model) => model.id)).toEqual([
+        "gpt-6-luna",
+        "claude-opus-4.8",
+      ])
+      expect(fetchMock).not.toHaveBeenCalled()
+
+      const ordinaryResponse = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode/1.0" },
+      })
+      const ordinary = (await ordinaryResponse.json()) as {
+        data: Array<{ id: string }>
+      }
+      expect(ordinary.data[0].id).toBe("gpt-6-luna")
+      expect(ordinary.data.map((model) => model.id)).toContain(
+        "opencode-go/glm-5.3-flash",
+      )
+    },
+  )
+
+  test("applies provider selections to Claude discovery using raw model IDs", async () => {
+    state.models = createCopilotModels([
+      "claude-opus-4.8",
+      "claude-sonnet-4.6",
+      "gpt-6-luna",
+    ])
+    enabledProviders = ["opencode-go", "custom", "hidden"]
+    providerConfigs = {
+      "github-copilot": {
+        ...createProviderConfig("github-copilot", "https://unused.example"),
+        agentsModels: ["claude-opus-4-8", "gpt-6-luna"],
+      },
+      "opencode-go": {
+        ...createProviderConfig("opencode-go", "https://unused.example"),
+        agentsModels: ["glm-5.3-flash"],
+      },
+      custom: {
+        ...createProviderConfig("custom", "https://custom.example"),
+        agentsModels: ["qwen-plus", "anthropic/claude-opus-4.8", "new-model"],
+      },
+      hidden: {
+        ...createProviderConfig("hidden", "https://hidden.example"),
+        agentsModels: [],
+      },
+    }
+
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "Claude-Code/2.1.258" },
+    })
+    const body = (await response.json()) as { data: Array<{ id: string }> }
+    expect(body.data.map((model) => model.id)).toEqual([
+      "claude-opus-4-8[1m]",
+      "my-claude-gpt-6-luna[1m]",
+      "opencode-go/my-claude-glm-5.3-flash[1m]",
+      "custom/my-claude-qwen-plus[1m]",
+      "custom/anthropic/claude-opus-4.8[1m]",
+      "custom/my-claude-new-model[1m]",
+    ])
+
+    const ordinaryResponse = await createApp().request("/v1/models")
+    const ordinary = (await ordinaryResponse.json()) as {
+      data: Array<{ id: string }>
+    }
+    expect(ordinary.data.map((model) => model.id)).toContain("hidden/qwen-plus")
+    expect(ordinary.data.map((model) => model.id)).toContain(
+      "claude-sonnet-4-6",
+    )
+  })
+
+  test("preserves raw Copilot selections and Codex provider IDs for Claude discovery", async () => {
+    enableCodexCatalog()
+    state.models = createCopilotModels(["claude-opus-4.8", "gpt-6-luna"])
+    providerConfigs["github-copilot"] = {
+      ...createProviderConfig("github-copilot", "https://unused.example"),
+      agentsModels: ["claude-opus-4.8"],
+    }
+    providerConfigs.codex!.agentsModels = ["gpt-6-luna"]
+
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "claude-cli/2.1.258" },
+    })
+    const body = (await response.json()) as { data: Array<{ id: string }> }
+    expect(body.data.map((model) => model.id)).toEqual([
+      "claude-opus-4-8[1m]",
+      "codex/my-claude-gpt-6-luna[1m]",
+    ])
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test("serves an empty Claude discovery list when every source is hidden", async () => {
+    state.models = createCopilotModels(["gpt-6-luna"])
+    providerConfigs["github-copilot"] = {
+      ...createProviderConfig("github-copilot", "https://unused.example"),
+      agentsModels: [],
+    }
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "claude-cli/2.1.258" },
+    })
+    expect(await response.json()).toEqual({
+      object: "list",
+      data: [],
+      has_more: false,
+    })
+  })
+
   test("ignores legacy count limits and strips full-export headers from all upstreams", async () => {
     enableCodexCatalog()
     enabledProviders.push("opencode-go")
@@ -334,7 +622,7 @@ describe("model routes", () => {
       },
       custom: {
         ...createProviderConfig("custom", "https://bad.example"),
-        codexModels: ["gpt-5.5", "chosen"],
+        agentsModels: ["gpt-5.5", "chosen"],
         models: { "gpt-5.5": {}, chosen: {}, hidden: {} },
       },
     }
@@ -443,7 +731,7 @@ describe("model routes", () => {
   )
   test("filters Codex native models and aliases without discarding the synthesis template", async () => {
     enableCodexCatalog()
-    providerConfigs.codex!.codexModels = ["gpt-native"]
+    providerConfigs.codex!.agentsModels = ["gpt-native"]
     codexCatalogModels.push({ ...codexCatalogModels[0], slug: "hidden-native" })
     const response = await createApp(false).request(
       "/models?client_version=0.160.0",
@@ -459,7 +747,7 @@ describe("model routes", () => {
       "gpt-native",
       "codex/gpt-native",
     ])
-    providerConfigs.codex!.codexModels = []
+    providerConfigs.codex!.agentsModels = []
     const empty = await createApp(false).request("/models", {
       headers: { "user-agent": "codex-tui/0.160.0" },
     })
@@ -476,7 +764,7 @@ describe("model routes", () => {
           "github-copilot",
           "https://api.githubcopilot.com",
         ),
-        codexModels: [selectedId],
+        agentsModels: [selectedId],
       }
 
       const response = await createApp().request("/v1/models", {
@@ -501,7 +789,7 @@ describe("model routes", () => {
   })
   test("applies the same policy to provider-scoped Codex catalogs", async () => {
     enableCodexCatalog()
-    providerConfigs.codex!.codexModels = ["gpt-native"]
+    providerConfigs.codex!.agentsModels = ["gpt-native"]
     codexCatalogModels.push({ ...codexCatalogModels[0], slug: "hidden-native" })
     const response = await createApp(false).request(
       "/codex/v1/models?client_version=0.160.0",
@@ -603,7 +891,7 @@ describe("model routes", () => {
     expect(
       body.data.find((model) => model.id === "deepseek/deepseek-flash"),
     ).toMatchObject({
-      display_name: "deepseek-flash",
+      display_name: "deepseek-flash (deepseek)",
       object: "model",
       owned_by: "deepseek",
     })
@@ -632,6 +920,7 @@ describe("model routes", () => {
       body.data.find((model) => model.id === "glm-5.3-flash"),
     ).toMatchObject({
       name: "GLM-5.3-Flash",
+      display_name: "GLM-5.3-Flash (opencode-go)",
       context_window: 1_000_000,
       max_output_tokens: 131_072,
       input_modalities: ["text", "image"],

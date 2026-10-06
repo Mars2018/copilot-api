@@ -147,6 +147,52 @@ afterEach(() => {
 })
 
 describe("messages handler orchestration", () => {
+  test.each([
+    ["my-claude-glm-5.3-flash", "glm-5.3-flash"],
+    ["my-claude-glm-5.3-flash[1m]", "glm-5.3-flash"],
+    ["contoso/my-claude-family/glm-5.3-flash", "contoso/family/glm-5.3-flash"],
+    [
+      "contoso/my-claude-family/glm-5.3-flash[1m]",
+      "contoso/family/glm-5.3-flash",
+    ],
+    ["claude-opus-4.8", "claude-opus-4.8"],
+    ["claude-opus-4.8[1m]", "claude-opus-4.8"],
+    ["glm-5.3-flash", "glm-5.3-flash"],
+    ["glm-5.3-flash[1m]", "glm-5.3-flash"],
+  ])(
+    "resolves discovered Messages ID %s to %s",
+    async (model, expectedModel) => {
+      const response = await createApp().request("/", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(createPayload({ model })),
+      })
+      expect(response.status).toBe(200)
+      expect(findEndpointModel).toHaveBeenCalledWith(expectedModel)
+      expect(handleWithChatCompletions.mock.calls[0][1].model).toBe(
+        expectedModel,
+      )
+    },
+  )
+
+  test("restores discovery IDs before applying configured model mappings", async () => {
+    modelMappings = { "glm-5.3-flash": "messages-model" }
+    selectedModel = {
+      id: "messages-model",
+      supported_endpoints: ["/v1/messages"],
+    }
+    const response = await createApp().request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        createPayload({ model: "my-claude-glm-5.3-flash[1m]" }),
+      ),
+    })
+    expect(response.status).toBe(200)
+    expect(findEndpointModel).toHaveBeenCalledWith("messages-model")
+    expect(handleWithMessagesApi.mock.calls[0][1].model).toBe("messages-model")
+  })
+
   test("merges message-level system prompts before forwarding to the selected flow", async () => {
     selectedModel = {
       id: "messages-model",

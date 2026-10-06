@@ -28,7 +28,6 @@ export interface Locale {
     close: string
     description: string
     configured: string
-    catalogBudget: string
     unsaved: string
     autoDescription: string
     selectedDescription: string

@@ -131,7 +131,7 @@ export interface ProviderConfig {
   accountId?: string
   pricingCurrency?: string
   models?: Record<string, ModelConfig>
-  codexModels?: Array<string>
+  agentsModels?: Array<string>
 }
 
 const modelResponsesApiCompactThresholds = {
@@ -244,7 +244,7 @@ export function readEditableConfigFromDisk(): AppConfig {
     if (!raw.trim()) {
       return {}
     }
-    return JSON.parse(raw) as AppConfig
+    return migrateProviderAgentModels(JSON.parse(raw) as AppConfig).mergedConfig
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
       return {}
@@ -257,7 +257,11 @@ export function readEditableConfigFromDisk(): AppConfig {
 }
 
 export function writeConfigToDisk(config: AppConfig): void {
-  writeFileAtomically(PATHS.CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`)
+  const { mergedConfig } = migrateProviderAgentModels(config)
+  writeFileAtomically(
+    PATHS.CONFIG_PATH,
+    `${JSON.stringify(mergedConfig, null, 2)}\n`,
+  )
 }
 
 export function setConfiguredApiKeys(apiKeys: Array<string>): Array<string> {
@@ -278,10 +282,12 @@ export function setConfiguredApiKeys(apiKeys: Array<string>): Array<string> {
   return [...uniqueKeys]
 }
 
-function mergeDefaultConfig(config: AppConfig): {
+function mergeDefaultConfig(inputConfig: AppConfig): {
   mergedConfig: AppConfig
   changed: boolean
 } {
+  const { mergedConfig: config, changed: agentModelsMigrated } =
+    migrateProviderAgentModels(inputConfig)
   const modelMappings = config.modelMappings ?? {}
   const defaultModelMappings = defaultConfig.modelMappings ?? {}
   const extraPrompts = config.extraPrompts ?? {}
@@ -341,6 +347,7 @@ function mergeDefaultConfig(config: AppConfig): {
     && !hasContextManagementChanges
     && !hasUpstreamTransportChanges
     && !upstreamTransportMigrated
+    && !agentModelsMigrated
   ) {
     return { mergedConfig: config, changed: false }
   }
@@ -376,6 +383,27 @@ function mergeDefaultConfig(config: AppConfig): {
     },
     changed: true,
   }
+}
+
+function migrateProviderAgentModels(config: AppConfig): {
+  mergedConfig: AppConfig
+  changed: boolean
+} {
+  let migratedProviders: AppConfig["providers"]
+  for (const [name, provider] of Object.entries(config.providers ?? {})) {
+    if (!Object.hasOwn(provider, "codexModels")) continue
+    const { codexModels, ...currentProvider } = provider as ProviderConfig & {
+      codexModels?: Array<string>
+    }
+    migratedProviders ??= { ...config.providers }
+    migratedProviders[name] = { agentsModels: codexModels, ...currentProvider }
+  }
+  return migratedProviders ?
+      {
+        mergedConfig: { ...config, providers: migratedProviders },
+        changed: true,
+      }
+    : { mergedConfig: config, changed: false }
 }
 
 function normalizeContextManagementConfig(

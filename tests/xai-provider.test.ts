@@ -108,7 +108,7 @@ if (process.env.COPILOT_API_XAI_TEST_PROCESS !== "1") {
           enabled: false,
           type: "openai-compatible",
           apiKey: "old-api-key",
-          codexModels: ["grok-test"],
+          agentsModels: ["grok-test"],
           models: { "grok-test": { temperature: 0.3 } },
         },
       })
@@ -119,7 +119,7 @@ if (process.env.COPILOT_API_XAI_TEST_PROCESS !== "1") {
         authType: "oauth2",
         type: "openai-responses",
         baseUrl: "https://api.x.ai",
-        codexModels: ["grok-test"],
+        agentsModels: ["grok-test"],
         models: { "grok-test": { temperature: 0.3 } },
       })
       expect(fs.readFileSync(PATHS.CONFIG_PATH, "utf8")).not.toContain("token")

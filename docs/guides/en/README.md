@@ -7,7 +7,7 @@ Start with the [quick start](../../../README.md#quick-start), then choose the gu
 | Guide | Contents |
 | --- | --- |
 | [Installation and Startup](getting-started.md) | Runtime requirements, npx, provider setup, and running from source |
-| [Claude Code](claude-code.md) | Interactive setup, settings.json, and model mappings |
+| [Claude Code](claude-code.md) | settings.json, gateway model discovery, and model mappings |
 | [OpenCode](opencode.md) | Anthropic SDK setup and model configuration |
 | [Codex](codex.md) | config.toml, `GITHUB_COPILOT_API_KEY` setup, model catalog, and auto-review mapping |
 | [Docker](docker.md) | Docker Compose, persistent storage, and networking |

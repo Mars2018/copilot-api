@@ -466,8 +466,8 @@ function buildCustomProviderConfig(
     ...(options.authType ? { authType: options.authType } : {}),
     pricingCurrency:
       options.pricingCurrency ?? existingProviderConfig.pricingCurrency,
-    ...(existingProviderConfig.codexModels !== undefined ?
-      { codexModels: existingProviderConfig.codexModels }
+    ...(existingProviderConfig.agentsModels !== undefined ?
+      { agentsModels: existingProviderConfig.agentsModels }
     : {}),
     ...(existingProviderConfig.models ?
       { models: existingProviderConfig.models }

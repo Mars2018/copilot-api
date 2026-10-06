@@ -30,7 +30,7 @@ export function buildProviderModelOptions(
         : [
             ...new Set([
               ...Object.keys(provider.models ?? {}),
-              ...(provider.codexModels ?? []),
+              ...(provider.agentsModels ?? []),
               ...sources.builtin(name),
               ...sources.catalog(provider.modelsDevProviderId ?? name),
             ]),

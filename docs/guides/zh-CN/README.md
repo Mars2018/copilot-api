@@ -7,7 +7,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [安装与启动](getting-started.md) | 运行环境、npx、provider 配置与源码运行 |
-| [Claude Code](claude-code.md) | 交互式配置、settings.json 与模型映射 |
+| [Claude Code](claude-code.md) | settings.json、网关模型发现与模型映射 |
 | [OpenCode](opencode.md) | Anthropic SDK 接入与模型配置 |
 | [Codex](codex.md) | config.toml、`GITHUB_COPILOT_API_KEY` 设置、模型目录与自动审核映射 |
 | [Docker](docker.md) | Docker Compose、持久化存储与网络设置 |

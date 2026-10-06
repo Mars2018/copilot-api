@@ -296,9 +296,6 @@ export default function ProviderManagementPanel({
                 <h4 className="text-[13px] font-semibold text-ink">
                   {t('providers.selection')}
                 </h4>
-                <span className="rounded-full border border-line px-2.5 py-1 text-[10px] font-medium text-ink-faint">
-                  {t('providers.catalogBudget')}
-                </span>
               </div>
               <div
                 role="radiogroup"
