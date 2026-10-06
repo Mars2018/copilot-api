@@ -10,6 +10,7 @@ import {
 import { state } from "~/lib/state"
 import { setupCodexToken } from "~/lib/token"
 import { getXaiAccessToken } from "~/lib/xai-token"
+import { XAI_API_BASE_URL } from "~/lib/oauth/xai"
 
 const AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default"
 
@@ -92,7 +93,16 @@ export async function resolveProviderConfig(
   const providerConfig = getProviderConfig(normalizedProviderName)
   if (providerConfig?.name === "xai" && providerConfig.authType === "oauth2") {
     const accessToken = await getXaiAccessToken()
-    return accessToken ? { ...providerConfig, apiKey: accessToken } : null
+    return accessToken ?
+        {
+          ...providerConfig,
+          baseUrl:
+            providerConfig.baseUrl === "https://api.x.ai" ?
+              XAI_API_BASE_URL
+            : providerConfig.baseUrl,
+          apiKey: accessToken,
+        }
+      : null
   }
   if (providerConfig?.authType !== "azure-entra") {
     return providerConfig

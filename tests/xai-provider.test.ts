@@ -12,6 +12,9 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
+import type { ResolvedProviderConfig } from "~/lib/config"
+import type { ResponsesPayload } from "~/lib/types/responses"
+
 // Existing route tests replace ES modules; run real-config integration checks
 // in a subprocess so those mocks cannot affect credential and account behavior.
 if (process.env.COPILOT_API_XAI_TEST_PROCESS !== "1") {
@@ -42,6 +45,7 @@ if (process.env.COPILOT_API_XAI_TEST_PROCESS !== "1") {
   } = await import("~/lib/config")
   const { PATHS } = await import("~/lib/paths")
   const { resolveProviderConfig } = await import("~/lib/provider-resolver")
+  const { requestContext } = await import("~/lib/request-context")
   const {
     getXaiAccessToken,
     persistXaiCredentials,
@@ -50,8 +54,11 @@ if (process.env.COPILOT_API_XAI_TEST_PROCESS !== "1") {
     selectXaiAccount,
     removeXaiAccount,
   } = await import("~/lib/xai-token")
-  const { buildProviderUpstreamHeaders, resolveProviderEndpointUrl } =
-    await import("~/services/providers/provider-proxy")
+  const {
+    buildProviderUpstreamHeaders,
+    resolveProviderEndpointUrl,
+    forwardProviderResponses,
+  } = await import("~/services/providers/provider-proxy")
 
   const savedPaths = { ...PATHS }
   const originalFetch = globalThis.fetch
@@ -118,7 +125,7 @@ if (process.env.COPILOT_API_XAI_TEST_PROCESS !== "1") {
         enabled: true,
         authType: "oauth2",
         type: "openai-responses",
-        baseUrl: "https://api.x.ai",
+        baseUrl: "https://cli-chat-proxy.grok.com",
         agentsModels: ["grok-test"],
         models: { "grok-test": { temperature: 0.3 } },
       })
@@ -137,7 +144,7 @@ if (process.env.COPILOT_API_XAI_TEST_PROCESS !== "1") {
       expect(provider?.type).toBe("openai-responses")
       expect(provider?.apiKey).toBe(credentials.accessToken)
       expect(resolveProviderEndpointUrl(provider!, "responses")).toBe(
-        "https://api.x.ai/v1/responses",
+        "https://cli-chat-proxy.grok.com/v1/responses",
       )
       expect(
         buildProviderUpstreamHeaders(
@@ -174,9 +181,33 @@ if (process.env.COPILOT_API_XAI_TEST_PROCESS !== "1") {
           apiKey: "xai-api-key",
         },
       })
-      expect((await resolveProviderConfig("xai"))?.apiKey).toBe("xai-api-key")
+      const provider = await resolveProviderConfig("xai")
+      expect(provider?.apiKey).toBe("xai-api-key")
+      expect(resolveProviderEndpointUrl(provider!, "chat/completions")).toBe(
+        "https://api.x.ai/v1/chat/completions",
+      )
       expect(fs.existsSync(PATHS.XAI_CREDENTIAL_PATH)).toBe(false)
     })
+
+    test.each([
+      ["https://api.x.ai/", "https://cli-chat-proxy.grok.com"],
+      ["https://custom.example", "https://custom.example"],
+    ])(
+      "resolves existing OAuth config at %s without rewriting it",
+      async (baseUrl, expected) => {
+        await persistXaiCredentials(credentials)
+        writeConfig({
+          xai: { type: "openai-responses", authType: "oauth2", baseUrl },
+        })
+        const provider = await resolveProviderConfig("xai")
+        expect(provider?.baseUrl).toBe(expected)
+        expect(provider?.apiKey).toBe(credentials.accessToken)
+        expect(resolveProviderEndpointUrl(provider!, "responses")).toBe(
+          `${expected}/v1/responses`,
+        )
+        expect(getRawProviderConfig("xai")?.baseUrl).toBe(baseUrl)
+      },
+    )
 
     test.each([
       "not-json",
@@ -472,5 +503,230 @@ if (process.env.COPILOT_API_XAI_TEST_PROCESS !== "1") {
         (await getXaiAccounts()).map((account) => account.accountId),
       ).toEqual(["other"])
     })
+  })
+
+  describe("xAI Grok Build Responses requests", () => {
+    const uuidPattern =
+      /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/u
+    const grokHeaderNames = [
+      "x-xai-token-auth",
+      "x-authenticateresponse",
+      "x-grok-client-version",
+      "x-grok-client-identifier",
+      "x-grok-client-mode",
+      "x-grok-model-override",
+      "x-grok-conv-id",
+      "x-grok-session-id",
+      "x-grok-req-id",
+    ]
+    const createProvider = (
+      overrides: Partial<ResolvedProviderConfig> = {},
+    ): ResolvedProviderConfig => ({
+      name: "xai",
+      type: "openai-responses",
+      authType: "oauth2",
+      baseUrl: "https://cli-chat-proxy.grok.com",
+      apiKey: credentials.accessToken,
+      ...overrides,
+    })
+
+    function captureRequests() {
+      const requests: Array<{
+        url: string
+        init: RequestInit | undefined
+      }> = []
+      setFetch((input, init) => {
+        if (input === "https://x.ai/cli/stable") {
+          return Promise.resolve(new Response("1.0.47\n"))
+        }
+        requests.push({
+          url: input instanceof Request ? input.url : input.toString(),
+          init,
+        })
+        return Promise.resolve(
+          new Response("data: [DONE]\n\n", {
+            headers: { "content-type": "text/event-stream" },
+          }),
+        )
+      })
+      return requests
+    }
+
+    async function forward(
+      payload: ResponsesPayload,
+      provider = createProvider(),
+      headers = new Headers(),
+    ) {
+      const response = await forwardProviderResponses(
+        provider,
+        payload,
+        headers,
+      )
+      await response.text()
+    }
+
+    const runWithSession = <T>(
+      callback: () => T,
+      sessionAffinity = "stable-affinity",
+    ): T =>
+      requestContext.run(
+        {
+          traceId: "test-trace",
+          startTime: Date.now(),
+          userAgent: "test-agent",
+          sessionAffinity,
+          parentSessionId: undefined,
+        },
+        callback,
+      )
+
+    test.each([false, true])(
+      "uses the official Responses URL and headers (stream=%s)",
+      async (stream) => {
+        await persistXaiCredentials(credentials)
+        const provider = await resolveProviderConfig("xai")
+        const requests = captureRequests()
+        const payload: ResponsesPayload = {
+          model: "grok-4.7",
+          input: "hello",
+          stream,
+          prompt_cache_key: "stable-cache-key",
+        }
+        await runWithSession(() =>
+          forward(
+            payload,
+            provider!,
+            new Headers({
+              authorization: "Bearer gateway-key",
+              accept: "text/event-stream",
+              "x-grok-client-version": "0.0.1",
+              "x-grok-req-id": "client-request-id",
+            }),
+          ),
+        )
+        expect(requests).toHaveLength(1)
+        expect(requests[0].url).toBe(
+          "https://cli-chat-proxy.grok.com/v1/responses",
+        )
+        const headers = new Headers(requests[0].init?.headers)
+        expect(Object.fromEntries(headers)).toMatchObject({
+          authorization: "Bearer access-token",
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          "x-xai-token-auth": "xai-grok-cli",
+          "x-authenticateresponse": "authenticate-response",
+          "x-grok-client-version": "1.0.47",
+          "x-grok-client-identifier": "grok-shell",
+          "x-grok-client-mode": "headless",
+          "x-grok-model-override": payload.model,
+          "x-grok-conv-id": payload.prompt_cache_key,
+          "x-grok-session-id": payload.prompt_cache_key,
+        })
+        expect(headers.get("x-grok-req-id")).toMatch(uuidPattern)
+        expect(requests[0].init?.body).toBe(JSON.stringify(payload))
+      },
+    )
+
+    test("keeps the cache key and session stable while generating a new request ID", async () => {
+      const requests = captureRequests()
+      const payload: ResponsesPayload = {
+        model: "grok-4.7",
+        input: "hello",
+        prompt_cache_key: "  original-cache-key  ",
+      }
+      await Promise.all([forward(payload), forward(payload)])
+      expect(requests).toHaveLength(2)
+      const headers = requests.map(
+        (request) => request.init?.headers as Record<string, string>,
+      )
+      for (const [index, header] of headers.entries()) {
+        expect(header["x-grok-session-id"]).toBe(payload.prompt_cache_key!)
+        expect(header["x-grok-conv-id"]).toBe(payload.prompt_cache_key!)
+        expect(header["x-grok-req-id"]).toMatch(uuidPattern)
+        expect(requests[index].init?.body).toBe(JSON.stringify(payload))
+      }
+      expect(headers[0]["x-grok-req-id"]).not.toBe(headers[1]["x-grok-req-id"])
+      expect(payload.prompt_cache_key).toBe("  original-cache-key  ")
+    })
+
+    test.each([undefined, null, "", "  "])(
+      "uses stable session affinity when the cache key is %s",
+      async (cacheKey) => {
+        const requests = captureRequests()
+        const payload: ResponsesPayload = {
+          model: "grok-4.7",
+          input: "hello",
+          prompt_cache_key: cacheKey,
+        }
+        await runWithSession(() =>
+          Promise.all([forward(payload), forward(payload)]),
+        )
+        const headers = requests.map(
+          (request) => new Headers(request.init?.headers),
+        )
+        for (const [index, header] of headers.entries()) {
+          expect(header.get("x-grok-session-id")).toBe("stable-affinity")
+          expect(header.get("x-grok-conv-id")).toBe("stable-affinity")
+          expect(requests[index].init?.body).toBe(JSON.stringify(payload))
+        }
+        expect(headers[0].get("x-grok-req-id")).not.toBe(
+          headers[1].get("x-grok-req-id"),
+        )
+      },
+    )
+
+    test.each([undefined, null, "", "  "])(
+      "rejects a missing or blank session key before forwarding (%s)",
+      async (cacheKey) => {
+        const requests = captureRequests()
+        const payload: ResponsesPayload = {
+          model: "grok-4.7",
+          input: "hello",
+          prompt_cache_key: cacheKey,
+        }
+        for (const attempt of [
+          () => forward(payload),
+          () => runWithSession(() => forward(payload), "  "),
+        ]) {
+          const error: unknown = await attempt().catch(
+            (error: unknown) => error,
+          )
+          expect(error).toBeInstanceOf(Error)
+          expect((error as Error).message).toBe(
+            "xAI OAuth Responses requests require prompt_cache_key or session affinity",
+          )
+        }
+        expect(requests).toHaveLength(0)
+        expect(payload.prompt_cache_key).toBe(cacheKey)
+      },
+    )
+
+    test.each([
+      { authType: "authorization", baseUrl: "https://api.x.ai" },
+      { authType: "authorization" },
+      { authType: "x-api-key" },
+      { name: "other-provider" },
+      { baseUrl: "https://api.x.ai" },
+      { baseUrl: "https://custom.example" },
+      { baseUrl: "https://cli-chat-proxy.grok.com.evil.example" },
+      { baseUrl: "http://cli-chat-proxy.grok.com" },
+    ] satisfies Array<Partial<ResolvedProviderConfig>>)(
+      "does not inject Grok headers for %j",
+      async (overrides) => {
+        const requests = captureRequests()
+        const provider = createProvider(overrides)
+        const payload: ResponsesPayload = {
+          model: "other-model",
+          input: "hello",
+          prompt_cache_key: "original-cache-key",
+        }
+        await forward(payload, provider)
+        const headers = new Headers(requests[0].init?.headers)
+        for (const name of grokHeaderNames)
+          expect(headers.has(name)).toBe(false)
+        expect(requests[0].url).toBe(`${provider.baseUrl}/v1/responses`)
+        expect(requests[0].init?.body).toBe(JSON.stringify(payload))
+      },
+    )
   })
 }

@@ -3,7 +3,7 @@ import { z } from "zod"
 import type { OAuthCredentials, XaiAuthInfo } from "~/lib/types/oauth"
 export type { XaiAuthInfo } from "~/lib/types/oauth"
 
-export const XAI_API_BASE_URL = "https://api.x.ai"
+export const XAI_API_BASE_URL = "https://cli-chat-proxy.grok.com"
 
 const CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 const ISSUER = "https://auth.x.ai/oauth2"
