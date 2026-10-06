@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto"
 
+import { builtinProviderModelRegistry } from "~/lib/builtin-provider-models"
 import { compactTextOnlyGuard } from "~/lib/compact"
+import { findEndpointModel } from "~/lib/models"
+import { getModelsDevModelMaxOutputTokens } from "~/lib/models-dev-cache"
+import { getRawProviderConfig } from "~/lib/provider-config"
+import { parseProviderModelAlias } from "~/lib/provider-model"
 import { requestContext } from "~/lib/request-context"
 import type {
   AnthropicAssistantContentBlock,
@@ -205,7 +210,12 @@ export function translateResponsesToMessages(
   const messagesPayload: AnthropicMessagesPayload = {
     model: options.model,
     messages,
-    max_tokens: Math.max(1, payload.max_output_tokens ?? 32_000),
+    // Codex does not send the catalog's max_output_tokens; Messages requires
+    // an explicit max_tokens value, so resolve the default in the adapter.
+    max_tokens: Math.max(
+      1,
+      payload.max_output_tokens ?? resolveDefaultMaxOutputTokens(options.model),
+    ),
     stream: payload.stream ?? false,
     temperature: payload.temperature ?? undefined,
     top_p: payload.top_p ?? undefined,
@@ -243,6 +253,37 @@ export function translateResponsesToMessages(
     publicModel: options.publicModel ?? payload.model,
     registry,
   }
+}
+
+function resolveDefaultMaxOutputTokens(model: string): number {
+  const alias = parseProviderModelAlias(model)
+  const providerConfig = alias ? getRawProviderConfig(alias.provider) : null
+  const catalogMaxOutputTokens =
+    alias ?
+      getModelsDevModelMaxOutputTokens(
+        providerConfig?.modelsDevProviderId || alias.provider,
+        alias.model,
+      )
+    : undefined
+  const builtinModelConfig =
+    alias ?
+      builtinProviderModelRegistry.getModelConfig(alias.provider, alias.model)
+    : undefined
+  const tokenLimits =
+    alias && (providerConfig || builtinModelConfig || catalogMaxOutputTokens) ?
+      [
+        providerConfig?.models?.[alias.model]?.maxOutputTokens,
+        catalogMaxOutputTokens,
+        builtinModelConfig?.maxOutputTokens,
+      ]
+    : [findEndpointModel(model)?.capabilities.limits.max_output_tokens]
+
+  return (
+    tokenLimits.find(
+      (limit): limit is number =>
+        typeof limit === "number" && Number.isInteger(limit) && limit > 0,
+    ) ?? 32_000
+  )
 }
 
 export function translateAnthropicToResponses(

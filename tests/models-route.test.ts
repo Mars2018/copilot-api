@@ -711,6 +711,12 @@ describe("model routes", () => {
   })
 
   test("prefers user model config over upstream and built-in defaults", async () => {
+    installModelsDevCatalog({
+      ...modelsDevCatalogFixture,
+      deepseek: {
+        models: { "deepseek-v4-pro": { limit: { output: 48_000 } } },
+      },
+    })
     enabledProviders = ["deepseek"]
     providerConfigs = {
       deepseek: {
@@ -743,6 +749,12 @@ describe("model routes", () => {
   })
 
   test("prefers upstream capabilities over built-in catalog defaults", async () => {
+    installModelsDevCatalog({
+      ...modelsDevCatalogFixture,
+      deepseek: {
+        models: { "deepseek-v4-pro": { limit: { output: 48_000 } } },
+      },
+    })
     enabledProviders = ["deepseek"]
     providerConfigs = {
       deepseek: createProviderConfig("deepseek", "https://deepseek.example"),
@@ -765,6 +777,59 @@ describe("model routes", () => {
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
+
+  test("uses models.dev output limits before built-in defaults in the Codex catalog", async () => {
+    installModelsDevCatalog({
+      ...modelsDevCatalogFixture,
+      kimi: { models: { "kimi-k2.5": { limit: { output: 131_072 } } } },
+    })
+    enabledProviders = ["kimi"]
+    providerConfigs.kimi = createProviderConfig("kimi", "https://kimi.example")
+
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "codex-cli/0.160.0" },
+    })
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as CodexModelsResponse
+    expect(
+      body.models.find((model) => model.slug === "kimi/kimi-k2.5")
+        ?.max_output_tokens,
+    ).toBe(131_072)
+  })
+
+  test.each([undefined, "catalog-provider", "openrouter"])(
+    "uses models.dev mapping %j for namespaced model output limits",
+    async (modelsDevProviderId) => {
+      installModelsDevCatalog({
+        ...modelsDevCatalogFixture,
+        [modelsDevProviderId ?? "custom"]: {
+          models: { "org/claude-model": { limit: { output: 65_536 } } },
+        },
+      })
+      enabledProviders = ["custom"]
+      providerConfigs.custom = {
+        ...createProviderConfig("custom", "https://custom.example"),
+        modelsDevProviderId,
+        models: { "org/claude-model": {} },
+      }
+
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "codex-cli/0.160.0" },
+      })
+
+      expect(response.status).toBe(200)
+      const body = (await response.json()) as CodexModelsResponse
+      expect(
+        body.models.find((model) => model.slug === "custom/org/claude-model")
+          ?.max_output_tokens,
+      ).toBe(65_536)
+      expect(
+        body.models.find((model) => model.slug === "custom/qwen-plus")
+          ?.max_output_tokens,
+      ).toBe(32_000)
+    },
+  )
 
   test("maps the OpenRouter image modality into Codex candidates", async () => {
     enabledProviders = ["openrouter"]

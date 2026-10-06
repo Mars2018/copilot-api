@@ -16,7 +16,10 @@ import { forwardError } from "~/lib/error"
 import { isGitHubCopilotEnabled } from "~/lib/github-copilot-provider"
 import { createHandlerLogger } from "~/lib/logger"
 import { stripInternalRequestHeaders } from "~/lib/internal-headers"
-import { getOpencodeGoModelRecords } from "~/lib/models-dev-cache"
+import {
+  getModelsDevModelMaxOutputTokens,
+  getOpencodeGoModelRecords,
+} from "~/lib/models-dev-cache"
 import { toClientModelId } from "~/lib/models"
 import { resolveProviderConfig } from "~/lib/provider-resolver"
 import { state } from "~/lib/state"
@@ -470,6 +473,10 @@ function createProviderCodexCandidate(
     maxOutputTokens: positiveNumber(
       modelConfig?.maxOutputTokens
         ?? getFirstPositiveNumber(remoteModel, ["max_output_tokens"])
+        ?? getModelsDevModelMaxOutputTokens(
+          providerConfig.modelsDevProviderId || providerConfig.name,
+          modelId,
+        )
         ?? builtinModelConfig?.maxOutputTokens,
       32_000,
     ),
