@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto"
 import { createServer } from "node:http"
+import type { OAuthCredentials } from "~/lib/types/oauth"
 
 export { CODEX_API_BASE_URL } from "~/services/codex/create-responses"
 
@@ -32,12 +33,7 @@ interface OAuthPageOptions {
   message: string
 }
 
-export interface CodexCredentials {
-  accessToken: string
-  refreshToken: string
-  expiresAt: number
-  accountId: string
-}
+export type CodexCredentials = OAuthCredentials
 
 export interface CodexAuthInfo {
   url: string

@@ -13,13 +13,19 @@ import * as serverAuth from '../electron/server-auth-config'
 import * as settingsStore from '../electron/settings-store'
 import * as providerManagement from '../../src/lib/provider-management'
 import { CodexOAuthError } from '../../src/lib/oauth/codex'
-import type { DesktopSettings, ServerKeysConfigUpdate } from '../src/types/ipc'
+import { XaiOAuthError } from '../../src/lib/oauth/xai'
+import * as xaiToken from '../../src/lib/xai-token'
+import type {
+  DesktopSettings,
+  ServerKeysConfigUpdate,
+  XaiAuthInfo,
+} from '../src/types/ipc'
 
 type IpcHandler = (event: unknown, ...parameters: unknown[]) => unknown
 const handlers = new Map<string, IpcHandler>()
 const openExternal = mock(() => Promise.resolve())
 let preloadApi: Window['electronAPI'] | undefined
-type RendererListener = (event: unknown, url: string) => void
+type RendererListener = (event: unknown, payload: unknown) => void
 const rendererListeners = new Map<string, Set<RendererListener>>()
 const rendererOff = mock((channel: string, listener: RendererListener) => {
   const listeners = rendererListeners.get(channel)
@@ -51,7 +57,7 @@ await mock.module('electron', () => ({
   },
   ipcRenderer: {
     invoke: rendererInvoke,
-    on: (channel: string, listener: (event: unknown, url: string) => void) => {
+    on: (channel: string, listener: RendererListener) => {
       const listeners =
         rendererListeners.get(channel) ?? new Set<RendererListener>()
       listeners.add(listener)
@@ -148,6 +154,19 @@ beforeEach(async () => {
   spyOn(providerAuth, 'selectCodexAccountForDesktop').mockResolvedValue(result)
   spyOn(providerAuth, 'removeCodexAccountForDesktop').mockResolvedValue(result)
   spyOn(providerAuth, 'loginCodexForDesktop').mockResolvedValue(result)
+  spyOn(providerAuth, 'loginXaiForDesktop').mockResolvedValue({
+    ...result,
+    providers: ['xai'],
+  })
+  spyOn(xaiToken, 'getXaiAccounts').mockResolvedValue([])
+  spyOn(xaiToken, 'selectXaiAccount').mockResolvedValue({
+    accountId: 'account-id',
+    active: true,
+  })
+  spyOn(xaiToken, 'removeXaiAccount').mockResolvedValue({
+    accountId: 'account-id',
+    active: false,
+  })
   spyOn(auth, 'getGitHubUser').mockResolvedValue('test-user')
   spyOn(auth, 'getCopilotAccountType').mockResolvedValue('individual')
   spyOn(auth, 'saveToken').mockResolvedValue(undefined)
@@ -172,7 +191,7 @@ beforeEach(async () => {
     { preconnect: () => {} },
   )
   spyOn(globalThis, 'fetch').mockImplementation(fetchResponse)
-  registerIpcHandlers({} as BrowserWindow)
+  registerIpcHandlers({ once: () => {} } as unknown as BrowserWindow)
   running = false
   await invoke('config:save-provider-management', {})
   running = true
@@ -221,6 +240,7 @@ describe('desktop Codex login controls', () => {
   test('publishes the URL without opening the browser and cancels the active login', async () => {
     const notifications = mock((_channel: string, _url: string) => {})
     registerIpcHandlers({
+      once: () => {},
       isDestroyed: () => false,
       webContents: { send: notifications },
     } as unknown as BrowserWindow)
@@ -320,6 +340,7 @@ describe('desktop Codex login controls', () => {
       const refreshing = Promise.withResolvers<void>()
       const notifications = mock((_channel: string) => {})
       registerIpcHandlers({
+        once: () => {},
         isDestroyed: () => false,
         webContents: { send: notifications },
       } as unknown as BrowserWindow)
@@ -394,6 +415,7 @@ describe('desktop Codex login controls', () => {
     const refresh = Promise.withResolvers<Response>()
     const refreshing = Promise.withResolvers<void>()
     registerIpcHandlers({
+      once: () => {},
       isDestroyed: () => false,
       webContents: { send: () => {} },
     } as unknown as BrowserWindow)
@@ -488,6 +510,156 @@ describe('desktop Codex login controls', () => {
   })
 })
 
+describe('desktop xAI login controls', () => {
+  const authInfo: XaiAuthInfo = {
+    url: 'https://auth.x.ai/device?user_code=CODE',
+    verificationUri: 'https://auth.x.ai/device',
+    userCode: 'CODE',
+    expiresAt: 123,
+  }
+
+  test('passes device codes, saving events and account actions through preload', async () => {
+    await import('../electron/preload')
+    if (!preloadApi) throw new Error('Preload bridge was not exposed')
+    const code = mock((_info: XaiAuthInfo) => {})
+    const saving = mock(() => {})
+    const unsubscribeCode = preloadApi.onXaiAuth(code)
+    const unsubscribeSaving = preloadApi.onXaiLoginSaving(saving)
+    for (const listener of rendererListeners.get('auth:xai-code')!) {
+      listener(undefined, authInfo)
+    }
+    for (const listener of rendererListeners.get('auth:xai-saving')!) {
+      listener(undefined, undefined)
+    }
+    expect(code).toHaveBeenCalledWith(authInfo)
+    expect(saving).toHaveBeenCalledTimes(1)
+    unsubscribeCode()
+    unsubscribeSaving()
+    expect(rendererListeners.size).toBe(0)
+    await preloadApi.getXaiAccounts()
+    await preloadApi.switchXaiAccount('work')
+    await preloadApi.removeXaiAccount('personal')
+    await preloadApi.startXaiLogin({ alias: 'Work' })
+    await preloadApi.cancelXaiLogin()
+    expect(rendererInvoke.mock.calls).toEqual([
+      ['auth:get-xai-accounts'],
+      ['auth:switch-xai-account', 'work'],
+      ['auth:remove-xai-account', 'personal'],
+      ['auth:start-xai-login', { alias: 'Work' }],
+      ['auth:cancel-xai-login'],
+    ])
+  })
+
+  test('publishes codes, rejects duplicate login and cancels when the window closes', async () => {
+    const notifications = mock((_channel: string, _payload?: unknown) => {})
+    let closed: (() => void) | undefined
+    registerIpcHandlers({
+      once: (_event: string, callback: () => void) => {
+        closed = callback
+      },
+      isDestroyed: () => false,
+      webContents: { send: notifications },
+    } as unknown as BrowserWindow)
+    const started = Promise.withResolvers<AbortSignal>()
+    spyOn(providerAuth, 'loginXaiForDesktop').mockImplementation((options) => {
+      options.onAuth?.(authInfo)
+      started.resolve(options.signal)
+      return new Promise((_resolve, reject) => {
+        options.signal!.addEventListener(
+          'abort',
+          () => reject(options.signal!.reason as Error),
+          { once: true },
+        )
+      })
+    })
+    const login = invoke('auth:start-xai-login', { alias: 'Work' })
+    const signal = await started.promise
+    expect(notifications).toHaveBeenCalledWith('auth:xai-code', authInfo)
+    expect(openExternal).not.toHaveBeenCalled()
+    expect(await invoke('auth:start-xai-login')).toMatchObject({
+      success: false,
+      error: 'xAI sign-in is already in progress.',
+    })
+    closed!()
+    expect(signal.aborted).toBe(true)
+    expect(await login).toMatchObject({ cancelled: true })
+    expect(await invoke('auth:cancel-xai-login')).toBe(false)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  test('publishes saving and keeps persistence uncancellable', async () => {
+    const notifications = mock((_channel: string, _payload?: unknown) => {})
+    registerIpcHandlers({
+      once: () => {},
+      isDestroyed: () => false,
+      webContents: { send: notifications },
+    } as unknown as BrowserWindow)
+    const saving = Promise.withResolvers<void>()
+    const persisted =
+      Promise.withResolvers<
+        Awaited<ReturnType<typeof providerAuth.loginXaiForDesktop>>
+      >()
+    spyOn(providerAuth, 'loginXaiForDesktop').mockImplementation((options) => {
+      options.onSaving?.()
+      saving.resolve()
+      return persisted.promise
+    })
+    const login = invoke('auth:start-xai-login')
+    await saving.promise
+    expect(notifications).toHaveBeenCalledWith('auth:xai-saving')
+    expect(await invoke('auth:cancel-xai-login')).toBe(false)
+    persisted.resolve({ success: true, mode: 'provider', providers: ['xai'] })
+    expect(await login).toMatchObject({ success: true, providers: ['xai'] })
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  test.each([
+    [
+      'authorization_expired',
+      'xAI authorization expired. Please sign in again.',
+    ],
+    [
+      'authorization_denied',
+      'xAI authorization was denied. Please sign in again.',
+    ],
+  ] as const)('reports %s in the selected locale', async (reason, error) => {
+    spyOn(providerAuth, 'loginXaiForDesktop').mockRejectedValueOnce(
+      new XaiOAuthError(reason),
+    )
+    expect(await invoke('auth:start-xai-login')).toMatchObject({
+      success: false,
+      error,
+    })
+    settings.language = 'zh'
+    spyOn(providerAuth, 'loginXaiForDesktop').mockRejectedValueOnce(
+      new XaiOAuthError(reason),
+    )
+    const result = await invoke('auth:start-xai-login')
+    expect(result).toMatchObject({ success: false })
+    expect(result).not.toMatchObject({ error })
+  })
+
+  test('returns account summaries and mutation failures without refreshing', async () => {
+    const accounts = [{ accountId: 'account-id', alias: 'Work', active: true }]
+    spyOn(xaiToken, 'getXaiAccounts').mockResolvedValueOnce(accounts)
+    expect(await invoke('auth:get-xai-accounts')).toEqual(accounts)
+    spyOn(xaiToken, 'selectXaiAccount').mockRejectedValueOnce(
+      new Error('Unknown account'),
+    )
+    expect(await invoke('auth:switch-xai-account', 'unknown')).toMatchObject({
+      success: false,
+      error: 'Unknown account',
+    })
+    spyOn(xaiToken, 'removeXaiAccount').mockRejectedValueOnce(
+      new Error('Active account'),
+    )
+    expect(await invoke('auth:remove-xai-account', 'account-id')).toMatchObject(
+      { success: false, error: 'Active account' },
+    )
+    expect(fetch).not.toHaveBeenCalled()
+  })
+})
+
 describe('desktop saves automatically refresh the running gateway', () => {
   test('remembers the startup key before the first save after an external rotation', async () => {
     await invoke('server:start', 4141, 'provider')
@@ -551,6 +723,9 @@ describe('desktop saves automatically refresh the running gateway', () => {
     ['auth:switch-codex-account', 'account-id'],
     ['auth:remove-codex-account', 'account-id'],
     ['auth:start-codex-login', {}],
+    ['auth:switch-xai-account', 'account-id'],
+    ['auth:remove-xai-account', 'account-id'],
+    ['auth:start-xai-login', {}],
     ['auth:save-token', 'github-token'],
     ['auth:logout', undefined],
   ]
@@ -609,6 +784,7 @@ describe('desktop saves automatically refresh the running gateway', () => {
       ++polls === 1 ? Promise.resolve('cancelled-token') : nextToken.promise,
     )
     registerIpcHandlers({
+      once: () => {},
       isDestroyed: () => false,
       webContents: { send: (channel: string) => notifications.push(channel) },
     } as unknown as BrowserWindow)

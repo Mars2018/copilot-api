@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AppUpdateStatus } from '../src/types/ipc'
+import type { AppUpdateStatus, XaiAuthInfo } from '../src/types/ipc'
 
 contextBridge.exposeInMainWorld('electronAPI', {
   getAuthStatus: () => ipcRenderer.invoke('auth:get-status'),
@@ -28,6 +28,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = () => callback()
     ipcRenderer.on('auth:codex-saving', handler)
     return () => ipcRenderer.off('auth:codex-saving', handler)
+  },
+  getXaiAccounts: () => ipcRenderer.invoke('auth:get-xai-accounts'),
+  switchXaiAccount: (accountId: string) =>
+    ipcRenderer.invoke('auth:switch-xai-account', accountId),
+  removeXaiAccount: (accountId: string) =>
+    ipcRenderer.invoke('auth:remove-xai-account', accountId),
+  startXaiLogin: (input?: unknown) =>
+    ipcRenderer.invoke('auth:start-xai-login', input),
+  cancelXaiLogin: () => ipcRenderer.invoke('auth:cancel-xai-login'),
+  onXaiAuth: (callback: (info: XaiAuthInfo) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, info: XaiAuthInfo) =>
+      callback(info)
+    ipcRenderer.on('auth:xai-code', handler)
+    return () => ipcRenderer.off('auth:xai-code', handler)
+  },
+  onXaiLoginSaving: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('auth:xai-saving', handler)
+    return () => ipcRenderer.off('auth:xai-saving', handler)
   },
   logout: () => ipcRenderer.invoke('auth:logout'),
 

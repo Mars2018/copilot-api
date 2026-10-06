@@ -25,14 +25,16 @@ export function buildProviderModelOptions(
       .filter(([name]) => name !== 'copilot')
       .map(([name, provider]) => [
         name,
-        [
-          ...new Set([
-            ...Object.keys(provider.models ?? {}),
-            ...(provider.codexModels ?? []),
-            ...sources.builtin(name),
-            ...sources.catalog(provider.modelsDevProviderId ?? name),
-          ]),
-        ].sort(),
+        provider.authType === 'oauth2' && name === 'xai' ?
+          sources.builtin(name)
+        : [
+            ...new Set([
+              ...Object.keys(provider.models ?? {}),
+              ...(provider.codexModels ?? []),
+              ...sources.builtin(name),
+              ...sources.catalog(provider.modelsDevProviderId ?? name),
+            ]),
+          ].sort(),
       ]),
   )
 }

@@ -63,6 +63,13 @@ export interface Locale {
     subtitle: string
     githubAuth: string
     codexAuth: string
+    xaiAuth: string
+    xaiAccounts: string
+    xaiNoAccounts: string
+    waitingXaiAuth: string
+    xaiLoginInProgress: string
+    xaiAuthExpired: string
+    xaiAuthDenied: string
     codexAccounts: string
     codexAccountAlias: string
     codexAccountAliasPlaceholder: string

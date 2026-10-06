@@ -6,6 +6,25 @@ import {
 } from '../src/lib/provider-model-options'
 
 describe('provider model options', () => {
+  test('shows only builtin Grok 4.7 for xAI OAuth without catalog discovery', () => {
+    const options = buildProviderModelOptions(
+      {
+        providers: {
+          xai: {
+            authType: 'oauth2',
+            enabled: false,
+            models: { 'unsupported-model': {} },
+            codexModels: ['unsupported-model'],
+          },
+        },
+      },
+      {
+        builtin: (name) => (name === 'xai' ? ['grok-4.7'] : []),
+        catalog: () => ['unwanted-catalog-model'],
+      },
+    )
+    expect(options.xai).toEqual(['grok-4.7'])
+  })
   test('combines configured, selected, builtin and catalog models for disabled providers without credentials', () => {
     const options = buildProviderModelOptions(
       {

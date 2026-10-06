@@ -50,6 +50,21 @@ const CODEX_LUNA_PRICING: TokenUsagePricingConfig = {
 
 export class BuiltinProviderModelRegistry {
   private static readonly catalog: BuiltinProviderModelCatalog = {
+    xai: {
+      "grok-4.7": {
+        contextWindow: 500_000,
+        maxOutputTokens: 500_000,
+        inputModalities: ["text", "image"],
+        reasoningEfforts: ["low", "medium", "high", "xhigh"],
+        defaultReasoningEffort: "high",
+        pricing: {
+          tiers: [
+            { cachedInput: 0.5, input: 2, output: 6, maxInputTokens: 200_000 },
+            { cachedInput: 1, input: 4, output: 12 },
+          ],
+        },
+      },
+    },
     codex: {
       "codex-auto-review": { pricing: CODEX_LUNA_PRICING },
       "gpt-reserve": { pricing: CODEX_LUNA_PRICING },
@@ -409,3 +424,20 @@ export class BuiltinProviderModelRegistry {
 }
 
 export const builtinProviderModelRegistry = new BuiltinProviderModelRegistry()
+
+export function getBuiltinProviderModelRecords(
+  provider: string,
+): Array<Record<string, unknown>> {
+  return builtinProviderModelRegistry.getModelIds(provider).map((id) => {
+    const config = builtinProviderModelRegistry.getModelConfig(provider, id)
+    return {
+      id,
+      name: id,
+      object: "model",
+      context_window: config?.contextWindow,
+      max_output_tokens: config?.maxOutputTokens,
+      input_modalities: config?.inputModalities,
+      reasoning_efforts: config?.reasoningEfforts,
+    }
+  })
+}

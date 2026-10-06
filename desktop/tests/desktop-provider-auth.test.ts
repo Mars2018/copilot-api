@@ -6,6 +6,7 @@ import {
   getDesktopCodexAccounts,
   getDesktopAuthStatus,
   loginCodexForDesktop,
+  loginXaiForDesktop,
   removeCodexAccountForDesktop,
   selectCodexAccountForDesktop,
   shouldStartInProviderMode,
@@ -607,5 +608,65 @@ describe('desktop provider auth', () => {
 
     expect(error).toBeInstanceOf(Error)
     expect((error as Error).message).toBe('apiKey must be a non-empty string')
+  })
+})
+
+describe('desktop xAI login', () => {
+  test('saves credentials with an alias and returns provider mode', async () => {
+    const credentials = {
+      accessToken: 'a',
+      refreshToken: 'r',
+      expiresAt: 100,
+      accountId: 'xai-user',
+    }
+    const onAuth = mock(() => {})
+    const onSaving = mock(() => {})
+    const persist = mock(() => Promise.resolve())
+    const result = await loginXaiForDesktop(
+      { alias: ' Work ', onAuth, onSaving },
+      {
+        loginXai: (options) => {
+          options.onAuth({
+            url: 'https://auth.x.ai/device',
+            userCode: 'CODE',
+            verificationUri: 'https://auth.x.ai/device',
+            expiresAt: 100,
+          })
+          return Promise.resolve(credentials)
+        },
+        persistXaiCredentials: persist,
+        getEnabledProviders: () => ['xai'],
+      },
+    )
+    expect(result).toEqual({
+      success: true,
+      mode: 'provider',
+      providers: ['xai'],
+    })
+    expect(persist).toHaveBeenCalledWith(credentials, { alias: 'Work' })
+    expect(onAuth).toHaveBeenCalled()
+    expect(onSaving).toHaveBeenCalled()
+  })
+  test('does not save credentials after cancellation', async () => {
+    const controller = new AbortController()
+    const persist = mock(() => Promise.resolve())
+    const reason = new Error('cancelled')
+    const result: unknown = await loginXaiForDesktop(
+      { signal: controller.signal },
+      {
+        loginXai: () => {
+          controller.abort(reason)
+          return Promise.resolve({
+            accessToken: 'a',
+            refreshToken: 'r',
+            expiresAt: 100,
+            accountId: 'xai-user',
+          })
+        },
+        persistXaiCredentials: persist,
+      },
+    ).catch((error: unknown) => error)
+    expect(result).toBe(reason)
+    expect(persist).not.toHaveBeenCalled()
   })
 })

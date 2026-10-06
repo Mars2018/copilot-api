@@ -10,6 +10,8 @@ import {
   type ProviderType,
 } from '../../src/lib/config'
 import { loginCodex } from '../../src/lib/oauth/codex'
+import { loginXai, type XaiAuthInfo } from '../../src/lib/oauth/xai'
+import { persistXaiCredentials } from '../../src/lib/xai-token'
 import { QUICK_PROVIDER_CONFIGS } from '../../src/lib/quick-providers'
 import {
   getCodexAccounts,
@@ -327,6 +329,41 @@ export async function getDesktopCodexAccounts(
   return await listAccounts()
 }
 
+export interface XaiDesktopLoginOptions {
+  alias?: string
+  onAuth?: (info: XaiAuthInfo) => void
+  onSaving?: () => void
+  signal?: AbortSignal
+}
+
+export async function loginXaiForDesktop(
+  options: XaiDesktopLoginOptions,
+  dependencies: {
+    loginXai?: typeof loginXai
+    persistXaiCredentials?: typeof persistXaiCredentials
+    getEnabledProviders?: () => string[]
+  } = {},
+): Promise<AuthResult> {
+  options.signal?.throwIfAborted()
+  const credentials = await (dependencies.loginXai ?? loginXai)({
+    onAuth: (info) => options.onAuth?.(info),
+    signal: options.signal,
+  })
+  options.signal?.throwIfAborted()
+  options.onSaving?.()
+  await (dependencies.persistXaiCredentials ?? persistXaiCredentials)(
+    credentials,
+    { alias: options.alias?.trim() || undefined },
+  )
+  return {
+    success: true,
+    mode: 'provider',
+    providers: (
+      dependencies.getEnabledProviders ?? getEnabledDesktopProviders
+    )(),
+  }
+}
+
 export async function selectCodexAccountForDesktop(
   accountId: string,
   dependencies: CodexDesktopAccountDependencies = {},
@@ -335,12 +372,10 @@ export async function selectCodexAccountForDesktop(
   const getEnabledProviders =
     dependencies.getEnabledProviders ?? getEnabledDesktopProviders
 
-  await selectAccount(accountId)
-  return {
-    success: true,
-    mode: 'provider',
-    providers: getEnabledProviders(),
-  }
+  return await updateDesktopAccount(
+    () => selectAccount(accountId),
+    getEnabledProviders,
+  )
 }
 
 export async function removeCodexAccountForDesktop(
@@ -351,7 +386,17 @@ export async function removeCodexAccountForDesktop(
   const getEnabledProviders =
     dependencies.getEnabledProviders ?? getEnabledDesktopProviders
 
-  await removeAccount(accountId)
+  return await updateDesktopAccount(
+    () => removeAccount(accountId),
+    getEnabledProviders,
+  )
+}
+
+export async function updateDesktopAccount(
+  operation: () => Promise<CodexAccountSummary>,
+  getEnabledProviders = getEnabledDesktopProviders,
+): Promise<AuthResult> {
+  await operation()
   return {
     success: true,
     mode: 'provider',

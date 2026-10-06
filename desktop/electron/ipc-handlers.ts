@@ -4,6 +4,13 @@ import { ipcMain, shell, BrowserWindow } from 'electron'
 
 import { normalizeApiKeys } from '../../src/lib/request-auth'
 import { CodexOAuthError } from '../../src/lib/oauth/codex'
+import { XaiOAuthError, type XaiAuthInfo } from '../../src/lib/oauth/xai'
+import { createOAuthLoginFlow } from './oauth-login'
+import {
+  getXaiAccounts,
+  selectXaiAccount,
+  removeXaiAccount,
+} from '../../src/lib/xai-token'
 import { loadModelsDevProviderOptions } from '../../src/lib/models-dev-cache'
 import { PATHS } from '../../src/lib/paths'
 import { invalidateConfigCache } from '../../src/lib/config-store'
@@ -36,6 +43,8 @@ import {
   getDesktopAuthStatus,
   getEnabledDesktopProviders,
   loginCodexForDesktop,
+  loginXaiForDesktop,
+  updateDesktopAccount,
   removeCodexAccountForDesktop,
   selectCodexAccountForDesktop,
   shouldStartInProviderMode,
@@ -60,6 +69,7 @@ import {
 import type {
   AuthResult,
   CodexLoginInput,
+  XaiLoginInput,
   DesktopAuthMode,
   DesktopProxySettings,
   DesktopSettings,
@@ -352,88 +362,93 @@ export function registerIpcHandlers(
     },
   )
 
-  let codexLoginController: AbortController | undefined
-  let codexLoginTask: Promise<AuthResult> | undefined
-  let codexLoginSaving = false
-  ipcMain.handle('auth:cancel-codex-login', () => {
-    if (!codexLoginController || codexLoginSaving) return false
-    codexLoginController.abort(new Error('Codex login cancelled'))
-    return true
+  const codexLogin = createOAuthLoginFlow<CodexLoginInput, string>({
+    login: (input, callbacks) =>
+      saveAndRefreshConfig(() =>
+        loginCodexForDesktop({
+          ...input,
+          ...callbacks,
+          onAuthUrl: callbacks.onAuth,
+        }),
+      ),
+    onAuth: (url) => {
+      if (!mainWindow.isDestroyed())
+        mainWindow.webContents.send('auth:codex-url', url)
+    },
+    onSaving: () => {
+      if (!mainWindow.isDestroyed())
+        mainWindow.webContents.send('auth:codex-saving')
+    },
+    inProgressError: () => tMain('auth.codexLoginInProgress'),
+    formatError: (error) =>
+      error instanceof CodexOAuthError ?
+        tMain(
+          error.reason === 'callback_timeout' ?
+            'auth.codexAuthTimeout'
+          : 'auth.codexCallbackUnavailable',
+        )
+      : Promise.resolve(error instanceof Error ? error.message : String(error)),
   })
-
+  ipcMain.handle('auth:cancel-codex-login', () => codexLogin.cancel())
   ipcMain.handle(
     'auth:start-codex-login',
-    async (_event, input: CodexLoginInput = {}): Promise<AuthResult> => {
-      const previousTask = codexLoginTask
-      if (
-        previousTask
-        && !codexLoginController?.signal.aborted
-        && !codexLoginSaving
-      ) {
-        return {
-          success: false,
-          mode: 'none',
-          error: await tMain('auth.codexLoginInProgress'),
-        }
-      }
-      const controller = new AbortController()
-      codexLoginController = controller
-      codexLoginSaving = false
-      let saving = false
-      codexLoginTask = (async () => {
-        try {
-          await previousTask
-          controller.signal.throwIfAborted()
-          return await saveAndRefreshConfig(() =>
-            loginCodexForDesktop({
-              alias: input.alias,
-              callbackUrlOrCode: input.callbackUrlOrCode,
-              onAuthUrl: (url) => {
-                if (!mainWindow.isDestroyed() && !controller.signal.aborted) {
-                  mainWindow.webContents.send('auth:codex-url', url)
-                }
-              },
-              onSaving: () => {
-                saving = true
-                if (codexLoginController === controller) {
-                  codexLoginSaving = true
-                  if (!mainWindow.isDestroyed()) {
-                    mainWindow.webContents.send('auth:codex-saving')
-                  }
-                }
-              },
-              signal: controller.signal,
-            }),
-          )
-        } catch (err) {
-          if (
-            !saving
-            && controller.signal.aborted
-            && (err === controller.signal.reason
-              || (err instanceof Error && err.name === 'AbortError'))
-          ) {
-            return { success: false, mode: 'none', cancelled: true }
-          }
-          const error =
-            err instanceof CodexOAuthError ?
-              await tMain(
-                err.reason === 'callback_timeout' ?
-                  'auth.codexAuthTimeout'
-                : 'auth.codexCallbackUnavailable',
-              )
-            : (err as Error).message
-          return { success: false, mode: 'none', error }
-        } finally {
-          if (codexLoginController === controller) {
-            codexLoginController = undefined
-            codexLoginTask = undefined
-            codexLoginSaving = false
-          }
-        }
-      })()
-      return codexLoginTask
-    },
+    (_event, input: CodexLoginInput = {}) => codexLogin.start(input),
   )
+
+  ipcMain.handle('auth:get-xai-accounts', () => getXaiAccounts())
+  for (const [channel, operation] of [
+    ['auth:switch-xai-account', selectXaiAccount],
+    ['auth:remove-xai-account', removeXaiAccount],
+  ] as const) {
+    ipcMain.handle(
+      channel,
+      async (_event, accountId: string): Promise<AuthResult> => {
+        try {
+          return await saveAndRefreshConfig(() =>
+            updateDesktopAccount(() => operation(accountId)),
+          )
+        } catch (error) {
+          return {
+            success: false,
+            mode: 'none',
+            error: error instanceof Error ? error.message : String(error),
+          }
+        }
+      },
+    )
+  }
+
+  const xaiLogin = createOAuthLoginFlow<XaiLoginInput, XaiAuthInfo>({
+    login: (input, callbacks) =>
+      saveAndRefreshConfig(() =>
+        loginXaiForDesktop({ ...input, ...callbacks }),
+      ),
+    onAuth: (info) => {
+      if (!mainWindow.isDestroyed())
+        mainWindow.webContents.send('auth:xai-code', info)
+    },
+    onSaving: () => {
+      if (!mainWindow.isDestroyed())
+        mainWindow.webContents.send('auth:xai-saving')
+    },
+    inProgressError: () => tMain('auth.xaiLoginInProgress'),
+    formatError: (error) =>
+      error instanceof XaiOAuthError ?
+        tMain(
+          error.reason === 'authorization_expired' ?
+            'auth.xaiAuthExpired'
+          : 'auth.xaiAuthDenied',
+        )
+      : Promise.resolve(error instanceof Error ? error.message : String(error)),
+  })
+  ipcMain.handle('auth:start-xai-login', (_event, input: XaiLoginInput = {}) =>
+    xaiLogin.start(input),
+  )
+  ipcMain.handle('auth:cancel-xai-login', () => xaiLogin.cancel())
+  mainWindow.once('closed', () => {
+    codexLogin.cancel()
+    xaiLogin.cancel()
+  })
 
   // Auth: Log out
   ipcMain.handle('auth:logout', async () => {

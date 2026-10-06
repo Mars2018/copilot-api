@@ -1,4 +1,5 @@
 import { Hono } from "hono"
+import { getBuiltinProviderModelRecords } from "~/lib/builtin-provider-models"
 
 import { forwardError } from "~/lib/error"
 import { createHandlerLogger } from "~/lib/logger"
@@ -62,6 +63,14 @@ providerModelRoutes.get("/", async (c) => {
         )
       }
       return c.json({ object: "list", data: models, has_more: false })
+    }
+
+    if (providerConfig.name === "xai" && providerConfig.authType === "oauth2") {
+      return c.json({
+        object: "list",
+        data: getBuiltinProviderModelRecords("xai"),
+        has_more: false,
+      })
     }
 
     const upstreamResponse = await forwardProviderModels(

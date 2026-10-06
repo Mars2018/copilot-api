@@ -8,7 +8,10 @@ import {
   type ProviderType,
   type ResolvedProviderConfig,
 } from "~/lib/config"
-import { builtinProviderModelRegistry } from "~/lib/builtin-provider-models"
+import {
+  builtinProviderModelRegistry,
+  getBuiltinProviderModelRecords,
+} from "~/lib/builtin-provider-models"
 import { forwardError } from "~/lib/error"
 import { isGitHubCopilotEnabled } from "~/lib/github-copilot-provider"
 import { createHandlerLogger } from "~/lib/logger"
@@ -66,16 +69,6 @@ function getStringField(
 ): string | undefined {
   const value = model[field]
   return typeof value === "string" && value.trim() ? value : undefined
-}
-
-function getBuiltinProviderModelRecords(
-  provider: string,
-): Array<Record<string, unknown>> {
-  return builtinProviderModelRegistry.getModelIds(provider).map((id) => ({
-    id,
-    name: id,
-    object: "model",
-  }))
 }
 
 type ProviderModelsFallbackReason = "error" | "invalid_body" | "non_ok"
@@ -144,6 +137,9 @@ async function getProviderModelRecords(
 ): Promise<Array<Record<string, unknown>>> {
   if (providerConfig.name === "opencode-go") {
     return getOpencodeGoModelRecords()
+  }
+  if (providerConfig.name === "xai" && providerConfig.authType === "oauth2") {
+    return getBuiltinProviderModelRecords("xai")
   }
 
   try {
@@ -360,7 +356,11 @@ async function getProviderCodexCandidates(
     )
     const modelIds = new Set([
       ...remoteById.keys(),
-      ...Object.keys(providerConfig.models ?? {}),
+      ...((
+        providerConfig.name === "xai" && providerConfig.authType === "oauth2"
+      ) ?
+        []
+      : Object.keys(providerConfig.models ?? {})),
     ])
 
     const candidates: Array<SyntheticCodexModelCandidate> = []
