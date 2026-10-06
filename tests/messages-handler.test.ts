@@ -1,9 +1,18 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
 import { Hono } from "hono"
 
 import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
 
 import { compactSummaryPromptStart, compactTextOnlyGuard } from "~/lib/compact"
+import { createFallbackModel } from "~/lib/provider-model"
 
 const actualStateModule = await import("~/lib/state")
 const actualConfigModule = await import("~/lib/config")
@@ -35,8 +44,13 @@ type FlowCallOptions = {
 }
 
 let selectedModel: SelectedModel | undefined
+let restoreModelLookup = () => {}
 
-const findEndpointModel = mock((_: string) => selectedModel)
+const findEndpointModel = mock((_: string) =>
+  selectedModel ?
+    { ...createFallbackModel(selectedModel.id), ...selectedModel }
+  : undefined,
+)
 const handleWithMessagesApi = mock(
   (
     _c: unknown,
@@ -70,10 +84,6 @@ await mock.module("~/lib/config", () => ({
   isResponsesApiWebSocketEnabled: () => responsesApiWebSocketEnabled,
   resolveMappedModel: (model: string) => modelMappings[model] ?? model,
 }))
-await mock.module("~/lib/models", () => ({
-  ...actualModelsModule,
-  findEndpointModel,
-}))
 await mock.module("~/lib/utils", () => ({
   ...actualUtilsModule,
 }))
@@ -99,6 +109,12 @@ const createPayload = (
 })
 
 beforeEach(() => {
+  const modelLookup = spyOn(
+    actualModelsModule,
+    "findEndpointModel",
+  ).mockImplementation(findEndpointModel)
+  restoreModelLookup = () => modelLookup.mockRestore()
+
   state.verbose = false
   messagesApiEnabled = true
   responsesApiWebSocketEnabled = true
@@ -120,6 +136,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  restoreModelLookup()
   messagesFlowHandlers.handleWithMessagesApi =
     defaultMessagesFlowHandlers.handleWithMessagesApi
   messagesFlowHandlers.handleWithResponsesApi =
