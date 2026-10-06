@@ -1,9 +1,18 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
 import { Hono } from "hono"
 
 import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
 
 import { compactSummaryPromptStart, compactTextOnlyGuard } from "~/lib/compact"
+import { createFallbackModel } from "~/lib/provider-model"
 
 const actualStateModule = await import("~/lib/state")
 const actualConfigModule = await import("~/lib/config")
@@ -35,8 +44,13 @@ type FlowCallOptions = {
 }
 
 let selectedModel: SelectedModel | undefined
+let restoreModelLookup = () => {}
 
-const findEndpointModel = mock((_: string) => selectedModel)
+const findEndpointModel = mock((_: string) =>
+  selectedModel ?
+    { ...createFallbackModel(selectedModel.id), ...selectedModel }
+  : undefined,
+)
 const handleWithMessagesApi = mock(
   (
     _c: unknown,
@@ -66,14 +80,9 @@ await mock.module("~/lib/state", () => ({
 await mock.module("~/lib/config", () => ({
   ...actualConfigModule,
   getClaudeAutoModel: () => claudeAutoModel,
-  getSmallModel: () => "small-model",
   isMessagesApiEnabled: () => messagesApiEnabled,
   isResponsesApiWebSocketEnabled: () => responsesApiWebSocketEnabled,
   resolveMappedModel: (model: string) => modelMappings[model] ?? model,
-}))
-await mock.module("~/lib/models", () => ({
-  ...actualModelsModule,
-  findEndpointModel,
 }))
 await mock.module("~/lib/utils", () => ({
   ...actualUtilsModule,
@@ -100,6 +109,12 @@ const createPayload = (
 })
 
 beforeEach(() => {
+  const modelLookup = spyOn(
+    actualModelsModule,
+    "findEndpointModel",
+  ).mockImplementation(findEndpointModel)
+  restoreModelLookup = () => modelLookup.mockRestore()
+
   state.verbose = false
   messagesApiEnabled = true
   responsesApiWebSocketEnabled = true
@@ -121,6 +136,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  restoreModelLookup()
   messagesFlowHandlers.handleWithMessagesApi =
     defaultMessagesFlowHandlers.handleWithMessagesApi
   messagesFlowHandlers.handleWithResponsesApi =
@@ -131,6 +147,52 @@ afterEach(() => {
 })
 
 describe("messages handler orchestration", () => {
+  test.each([
+    ["my-claude-glm-5.3-flash", "glm-5.3-flash"],
+    ["my-claude-glm-5.3-flash[1m]", "glm-5.3-flash"],
+    ["contoso/my-claude-family/glm-5.3-flash", "contoso/family/glm-5.3-flash"],
+    [
+      "contoso/my-claude-family/glm-5.3-flash[1m]",
+      "contoso/family/glm-5.3-flash",
+    ],
+    ["claude-opus-4.8", "claude-opus-4.8"],
+    ["claude-opus-4.8[1m]", "claude-opus-4.8"],
+    ["glm-5.3-flash", "glm-5.3-flash"],
+    ["glm-5.3-flash[1m]", "glm-5.3-flash"],
+  ])(
+    "resolves discovered Messages ID %s to %s",
+    async (model, expectedModel) => {
+      const response = await createApp().request("/", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(createPayload({ model })),
+      })
+      expect(response.status).toBe(200)
+      expect(findEndpointModel).toHaveBeenCalledWith(expectedModel)
+      expect(handleWithChatCompletions.mock.calls[0][1].model).toBe(
+        expectedModel,
+      )
+    },
+  )
+
+  test("restores discovery IDs before applying configured model mappings", async () => {
+    modelMappings = { "glm-5.3-flash": "messages-model" }
+    selectedModel = {
+      id: "messages-model",
+      supported_endpoints: ["/v1/messages"],
+    }
+    const response = await createApp().request("/", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        createPayload({ model: "my-claude-glm-5.3-flash[1m]" }),
+      ),
+    })
+    expect(response.status).toBe(200)
+    expect(findEndpointModel).toHaveBeenCalledWith("messages-model")
+    expect(handleWithMessagesApi.mock.calls[0][1].model).toBe("messages-model")
+  })
+
   test("merges message-level system prompts before forwarding to the selected flow", async () => {
     selectedModel = {
       id: "messages-model",
@@ -674,7 +736,9 @@ describe("messages handler orchestration", () => {
 
     expect(response.status).toBe(200)
     expect(await response.text()).toBe("messages")
-    expect(findEndpointModel).toHaveBeenCalledWith("small-model")
+    expect(findEndpointModel).toHaveBeenCalledWith(
+      actualConfigModule.getSmallModel(),
+    )
 
     const expectedSessionId = actualUtilsModule.getUUID("session-123")
     const expectedRequestId = actualUtilsModule.generateRequestIdFromPayload(
@@ -724,6 +788,29 @@ describe("messages handler orchestration", () => {
     expect(await response.text()).toBe("messages")
     expect(findEndpointModel).toHaveBeenCalledTimes(1)
     expect(findEndpointModel).toHaveBeenCalledWith("auto-model")
+  })
+
+  test("prefers the root session header when dispatching to the Messages API", async () => {
+    selectedModel = {
+      id: "messages-model",
+      supported_endpoints: ["/v1/messages"],
+    }
+    const payload = createPayload()
+    const response = await createApp().request("/", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-root-session-id": "root-session",
+        "x-session-id": "child-session",
+      },
+      body: JSON.stringify(payload),
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe("messages")
+    expect(handleWithMessagesApi.mock.calls[0][2].sessionId).toBe(
+      actualUtilsModule.getUUID("root-session"),
+    )
   })
 
   test("prefers dispatch-provided session, request, and subagent context", async () => {

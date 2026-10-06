@@ -68,6 +68,7 @@ import { debugJson } from "~/lib/logger"
 
 export const webSearchFlowDependencies = {
   createResponses: createCopilotResponses,
+  getMessageApiWebSearchModel,
   resolveProviderConfig,
   createUsageRecorder: (
     payload: AnthropicMessagesPayload,
@@ -336,7 +337,7 @@ export const tryHandleWebSearch = async (
   normalizeSystemMessages(payload)
 
   const route = await resolveWebSearchRoute(payload, {
-    webSearchModel: getMessageApiWebSearchModel(),
+    webSearchModel: webSearchFlowDependencies.getMessageApiWebSearchModel(),
     responsesWebSearchEnabled: isResponsesApiWebSearchEnabled(),
     resolveProviderConfig: webSearchFlowDependencies.resolveProviderConfig,
   })

@@ -1,4 +1,5 @@
 import consola from "consola"
+import { randomUUID } from "node:crypto"
 import {
   fetch as undiciFetch,
   type RequestInit as UndiciRequestInit,
@@ -8,6 +9,8 @@ import {
   getUpstreamTransportConfig,
   type ResolvedProviderConfig,
 } from "~/lib/config"
+import { getGrokBuildVersion } from "~/lib/grok-build"
+import { XAI_API_BASE_URL } from "~/lib/oauth/xai"
 import { requestContext } from "~/lib/request-context"
 import { createTimeoutDispatcher } from "~/lib/timeout-dispatcher"
 import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
@@ -36,6 +39,17 @@ const STRIPPED_RESPONSE_HEADERS = [
   "upgrade",
 ] as const
 
+export function resolveProviderEndpointUrl(
+  providerConfig: ResolvedProviderConfig,
+  endpoint: string,
+): string {
+  const apiBaseUrl =
+    providerConfig.modelsDevProviderId ?
+      providerConfig.baseUrl.replace(/\/(?:chat\/completions|responses)$/u, "")
+    : `${providerConfig.baseUrl}/v1`
+  return `${apiBaseUrl}/${endpoint}`
+}
+
 export function buildProviderUpstreamHeaders(
   providerConfig: ResolvedProviderConfig,
   requestHeaders: Headers,
@@ -62,6 +76,10 @@ export function buildProviderUpstreamHeaders(
 
   if (providerConfig.type !== "anthropic") {
     return headers
+  }
+
+  if (providerConfig.modelsDevProviderId) {
+    headers["anthropic-version"] = "2023-06-01"
   }
 
   for (const headerName of ANTHROPIC_FORWARDABLE_HEADERS) {
@@ -105,21 +123,61 @@ const applyOpencodeSessionHeader = (
   headers[OPENCODE_SESSION_HEADER] = session
 }
 
+async function applyXaiGrokBuildHeaders(
+  providerConfig: ResolvedProviderConfig,
+  headers: Record<string, string>,
+  payload: ResponsesPayload,
+): Promise<void> {
+  if (
+    providerConfig.name !== "xai"
+    || providerConfig.authType !== "oauth2"
+    || new URL(providerConfig.baseUrl).origin !== XAI_API_BASE_URL
+  ) {
+    return
+  }
+
+  const cacheKey = payload.prompt_cache_key
+  const sessionId =
+    cacheKey?.trim() ?
+      cacheKey
+    : requestContext.getStore()?.sessionAffinity?.trim()
+  if (!sessionId) {
+    throw new Error(
+      "xAI OAuth Responses requests require prompt_cache_key or session affinity",
+    )
+  }
+  headers["x-xai-token-auth"] = "xai-grok-cli"
+  headers["x-authenticateresponse"] = "authenticate-response"
+  headers["x-grok-client-version"] = await getGrokBuildVersion()
+  headers["x-grok-client-identifier"] = "grok-shell"
+  headers["x-grok-client-mode"] = "headless"
+  headers["x-grok-model-override"] = payload.model
+  headers["x-grok-conv-id"] = sessionId
+  headers["x-grok-session-id"] = sessionId
+  headers["x-grok-req-id"] = randomUUID()
+}
+
 export function createProviderProxyResponse(
   upstreamResponse: Response,
   body?: ReadableStream<Uint8Array> | null,
 ): Response {
-  const headers = new Headers(upstreamResponse.headers)
+  return new Response(body ?? upstreamResponse.body, {
+    headers: createProviderProxyResponseHeaders(upstreamResponse.headers),
+    status: upstreamResponse.status,
+    statusText: upstreamResponse.statusText,
+  })
+}
+
+export function createProviderProxyResponseHeaders(
+  upstreamHeaders: Headers,
+): Headers {
+  const headers = new Headers(upstreamHeaders)
 
   for (const headerName of STRIPPED_RESPONSE_HEADERS) {
     headers.delete(headerName)
   }
 
-  return new Response(body ?? upstreamResponse.body, {
-    headers,
-    status: upstreamResponse.status,
-    statusText: upstreamResponse.statusText,
-  })
+  return headers
 }
 
 export async function forwardProviderMessages(
@@ -137,7 +195,7 @@ export async function forwardProviderMessages(
   )
   const transportConfig = getUpstreamTransportConfig()
   return await fetchUpstreamWithLifecycle(
-    `${providerConfig.baseUrl}/v1/messages`,
+    resolveProviderEndpointUrl(providerConfig, "messages"),
     {
       method: "POST",
       headers,
@@ -166,7 +224,7 @@ export async function forwardProviderChatCompletions(
   )
   const transportConfig = getUpstreamTransportConfig()
   return await fetchUpstreamWithLifecycle(
-    `${providerConfig.baseUrl}/v1/chat/completions`,
+    resolveProviderEndpointUrl(providerConfig, "chat/completions"),
     {
       method: "POST",
       headers,
@@ -194,8 +252,9 @@ export async function forwardProviderResponses(
     headers,
     payload.prompt_cache_key?.trim() || undefined,
   )
+  await applyXaiGrokBuildHeaders(providerConfig, headers, payload)
   return await fetchUpstreamWithLifecycle(
-    `${providerConfig.baseUrl}/v1/responses`,
+    resolveProviderEndpointUrl(providerConfig, "responses"),
     {
       method: "POST",
       headers,
@@ -215,7 +274,7 @@ export async function forwardProviderModels(
   providerConfig: ResolvedProviderConfig,
   requestHeaders: Headers,
 ): Promise<Response> {
-  return await fetch(`${providerConfig.baseUrl}/v1/models`, {
+  return await fetch(resolveProviderEndpointUrl(providerConfig, "models"), {
     method: "GET",
     headers: buildProviderUpstreamHeaders(providerConfig, requestHeaders),
     signal: AbortSignal.timeout(PROVIDER_MODELS_TIMEOUT_MS),
@@ -234,7 +293,9 @@ function resolveProviderRequestUrl(
   requestUrl: string,
   path: string,
 ): string {
-  const upstreamUrl = new URL(`${providerConfig.baseUrl}${path}`)
+  const upstreamUrl = new URL(
+    resolveProviderEndpointUrl(providerConfig, path.replace(/^\/v1\//u, "")),
+  )
   upstreamUrl.search = new URL(requestUrl, "http://localhost").search
   return upstreamUrl.toString()
 }

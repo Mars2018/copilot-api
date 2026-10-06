@@ -84,6 +84,8 @@ export function translateToOpenAI(
     supportPdf: options.supportPdf ?? false,
     toolContentSupportType: options.toolContentSupportType ?? [],
   }
+  const tools = translateAnthropicToolsToOpenAI(payload.tools)
+  const parallelToolCalls = translateParallelToolCalls(payload.tool_choice)
   return {
     model: modelId,
     messages: translateAnthropicMessagesToOpenAI(
@@ -97,11 +99,17 @@ export function translateToOpenAI(
     temperature: payload.temperature,
     top_p: payload.top_p,
     user: payload.metadata?.user_id,
-    tools: translateAnthropicToolsToOpenAI(payload.tools),
-    tool_choice: translateAnthropicToolChoiceToOpenAI(payload.tool_choice),
+    tools,
+    tool_choice:
+      tools && tools.length > 0 ?
+        translateAnthropicToolChoiceToOpenAI(payload.tool_choice)
+      : undefined,
     thinking_budget: thinkingBudget,
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
+    ...(parallelToolCalls === undefined ?
+      {}
+    : { parallel_tool_calls: parallelToolCalls }),
   }
 }
 
@@ -563,6 +571,16 @@ function translateAnthropicToolChoiceToOpenAI(
       return undefined
     }
   }
+}
+
+function translateParallelToolCalls(
+  toolChoice: AnthropicMessagesPayload["tool_choice"],
+): boolean | undefined {
+  if (typeof toolChoice?.disable_parallel_tool_use !== "boolean") {
+    return undefined
+  }
+
+  return !toolChoice.disable_parallel_tool_use
 }
 
 // Response translation

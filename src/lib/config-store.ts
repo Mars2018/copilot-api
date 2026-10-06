@@ -15,7 +15,7 @@ export interface AppConfig {
   providers?: Record<string, ProviderConfig>
   modelMappings?: Record<string, string>
   extraPrompts?: Record<string, string>
-  smallModel?: string
+  smallModels?: SmallModelsConfig
   contextManagement?: ContextManagementConfig
   modelResponsesApiCompactThresholds?: Record<string, number>
   modelReasoningEfforts?: Record<
@@ -45,6 +45,12 @@ export interface AppConfig {
   // their current provider. Leave empty to disable (default).
   claudeAutoModel?: string
   claudeTokenMultiplier?: number
+}
+
+export interface SmallModelsConfig {
+  codex?: string
+  copilot?: string
+  [providerName: string]: string | undefined
 }
 
 export interface ContextManagementConfig {
@@ -119,18 +125,14 @@ export interface ProviderConfig {
   type?: string
   enabled?: boolean
   baseUrl?: string
+  modelsDevProviderId?: string
   apiKey?: string
   authType?: ProviderAuthType
+  accountId?: string
   pricingCurrency?: string
   models?: Record<string, ModelConfig>
+  agentsModels?: Array<string>
 }
-
-const gpt5ExplorationPrompt = `## Exploration and reading files
-- **Think first.** Before any tool call, decide ALL files/resources you will need.
-- **Batch everything.** If you need multiple files (even from different places), read them together.
-- **multi_tool_use.parallel** Use multi_tool_use.parallel to parallelize tool calls and only this.
-- **Only make sequential calls if you truly cannot know the next file without seeing a result first.**
-- **Workflow:** (a) plan all needed reads → (b) issue one parallel batch → (c) analyze results → (d) repeat if new, unpredictable reads arise.`
 
 const modelResponsesApiCompactThresholds = {
   "gpt-5.4": 272_000 * 0.8,
@@ -147,23 +149,23 @@ export const defaultConfig: AppConfig = {
     apiKeys: [],
   },
   providers: {},
-  modelMappings: {},
-  extraPrompts: {
-    "gpt-5-mini": gpt5ExplorationPrompt,
+  modelMappings: {
+    "codex-auto-review": "codex/codex-auto-review",
+    "gpt-reserve": "codex/gpt-reserve",
   },
-  smallModel: "gpt-5-mini",
+  smallModels: {
+    codex: "gpt-6-luna",
+    copilot: "gpt-6-luna",
+  },
   contextManagement: defaultContextManagement,
   modelResponsesApiCompactThresholds,
-  modelReasoningEfforts: {
-    "gpt-5-mini": "low",
-  },
   useMessagesApi: true,
   useResponsesApiWebSocket: true,
   upstreamTransport: defaultUpstreamTransportConfig,
   useResponsesApiWebSearch: true,
   alphaSearchCodexPriority: true,
-  alphaSearchModel: "gpt-5-mini",
-  messageApiWebSearchModel: "gpt-5-mini",
+  alphaSearchModel: "gpt-6-luna",
+  messageApiWebSearchModel: "gpt-6-luna",
 }
 
 let cachedConfig: AppConfig | null = null
@@ -242,7 +244,7 @@ export function readEditableConfigFromDisk(): AppConfig {
     if (!raw.trim()) {
       return {}
     }
-    return JSON.parse(raw) as AppConfig
+    return migrateProviderAgentModels(JSON.parse(raw) as AppConfig).mergedConfig
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
       return {}
@@ -255,7 +257,11 @@ export function readEditableConfigFromDisk(): AppConfig {
 }
 
 export function writeConfigToDisk(config: AppConfig): void {
-  writeFileAtomically(PATHS.CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`)
+  const { mergedConfig } = migrateProviderAgentModels(config)
+  writeFileAtomically(
+    PATHS.CONFIG_PATH,
+    `${JSON.stringify(mergedConfig, null, 2)}\n`,
+  )
 }
 
 export function setConfiguredApiKeys(apiKeys: Array<string>): Array<string> {
@@ -276,10 +282,14 @@ export function setConfiguredApiKeys(apiKeys: Array<string>): Array<string> {
   return [...uniqueKeys]
 }
 
-function mergeDefaultConfig(config: AppConfig): {
+function mergeDefaultConfig(inputConfig: AppConfig): {
   mergedConfig: AppConfig
   changed: boolean
 } {
+  const { mergedConfig: config, changed: agentModelsMigrated } =
+    migrateProviderAgentModels(inputConfig)
+  const modelMappings = config.modelMappings ?? {}
+  const defaultModelMappings = defaultConfig.modelMappings ?? {}
   const extraPrompts = config.extraPrompts ?? {}
   const defaultExtraPrompts = defaultConfig.extraPrompts ?? {}
   const responsesApiCompactThresholds =
@@ -301,6 +311,9 @@ function mergeDefaultConfig(config: AppConfig): {
   )
   const defaultContextManagementConfig = defaultConfig.contextManagement ?? {}
 
+  const missingModelMappings = Object.keys(defaultModelMappings).filter(
+    (model) => !Object.hasOwn(modelMappings, model),
+  )
   const missingExtraPromptModels = Object.keys(defaultExtraPrompts).filter(
     (model) => !Object.hasOwn(extraPrompts, model),
   )
@@ -315,6 +328,7 @@ function mergeDefaultConfig(config: AppConfig): {
     defaultContextManagementConfig,
   ).filter((key) => !Object.hasOwn(contextManagement, key))
 
+  const hasModelMappingChanges = missingModelMappings.length > 0
   const hasExtraPromptChanges = missingExtraPromptModels.length > 0
   const hasReasoningEffortChanges = missingReasoningEffortModels.length > 0
   const hasResponsesApiCompactThresholdChanges =
@@ -326,12 +340,14 @@ function mergeDefaultConfig(config: AppConfig): {
   )
 
   if (
-    !hasExtraPromptChanges
+    !hasModelMappingChanges
+    && !hasExtraPromptChanges
     && !hasReasoningEffortChanges
     && !hasResponsesApiCompactThresholdChanges
     && !hasContextManagementChanges
     && !hasUpstreamTransportChanges
     && !upstreamTransportMigrated
+    && !agentModelsMigrated
   ) {
     return { mergedConfig: config, changed: false }
   }
@@ -343,6 +359,10 @@ function mergeDefaultConfig(config: AppConfig): {
   return {
     mergedConfig: {
       ...persistedConfig,
+      modelMappings: {
+        ...defaultModelMappings,
+        ...modelMappings,
+      },
       contextManagement: {
         ...defaultContextManagementConfig,
         ...contextManagement,
@@ -363,6 +383,27 @@ function mergeDefaultConfig(config: AppConfig): {
     },
     changed: true,
   }
+}
+
+function migrateProviderAgentModels(config: AppConfig): {
+  mergedConfig: AppConfig
+  changed: boolean
+} {
+  let migratedProviders: AppConfig["providers"]
+  for (const [name, provider] of Object.entries(config.providers ?? {})) {
+    if (!Object.hasOwn(provider, "codexModels")) continue
+    const { codexModels, ...currentProvider } = provider as ProviderConfig & {
+      codexModels?: Array<string>
+    }
+    migratedProviders ??= { ...config.providers }
+    migratedProviders[name] = { agentsModels: codexModels, ...currentProvider }
+  }
+  return migratedProviders ?
+      {
+        mergedConfig: { ...config, providers: migratedProviders },
+        changed: true,
+      }
+    : { mergedConfig: config, changed: false }
 }
 
 function normalizeContextManagementConfig(
@@ -488,6 +529,11 @@ export function getConfig(): AppConfig {
   return cachedConfig
 }
 
+// Refresh this process on its next read without rewriting defaults to disk.
+export function invalidateConfigCache(): void {
+  cachedConfig = null
+}
+
 export function reloadConfig(): AppConfig {
   return mergeConfigWithDefaults()
 }
@@ -561,13 +607,13 @@ export function isAlphaSearchCodexPriorityEnabled(): boolean {
 }
 
 export function getAlphaSearchModel(): string | undefined {
-  const model = getConfig().alphaSearchModel ?? "gpt-5-mini"
+  const model = getConfig().alphaSearchModel ?? "gpt-6-luna"
   return model.trim() || undefined
 }
 
 export function getMessageApiWebSearchModel(): string | undefined {
   const config = getConfig()
-  const model = config.messageApiWebSearchModel ?? "gpt-5-mini"
+  const model = config.messageApiWebSearchModel ?? "gpt-6-luna"
   return model && model.trim().length > 0 ? model : undefined
 }
 

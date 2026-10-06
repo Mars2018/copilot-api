@@ -10,6 +10,7 @@ import {
   resolveMappedModel,
 } from "~/lib/config"
 import { createHandlerLogger, debugJson } from "~/lib/logger"
+import { fromClaudeDiscoveryModelId } from "~/lib/claude-models"
 import { findEndpointModel } from "~/lib/models"
 import { resolveConfiguredProviderModelAlias } from "~/lib/provider-resolver"
 import { state } from "~/lib/state"
@@ -56,6 +57,7 @@ export const messagesFlowHandlers = {
 
 export async function handleCompletion(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+  anthropicPayload.model = fromClaudeDiscoveryModelId(anthropicPayload.model)
 
   return await handleCompletionPayload(c, anthropicPayload)
 }
@@ -149,7 +151,11 @@ export async function handleCompletionPayload(
     const tools = anthropicPayload.tools
     const noTools = !tools || tools.length === 0
     if (anthropicBeta && noTools && compactType === 0) {
-      anthropicPayload.model = getSmallModel()
+      const smallModel = getSmallModel()
+      consola.debug(
+        `Claude Code warmup small model: ${anthropicPayload.model} -> ${smallModel}`,
+      )
+      anthropicPayload.model = smallModel
     }
   }
 

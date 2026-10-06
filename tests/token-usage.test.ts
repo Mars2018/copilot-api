@@ -8,6 +8,7 @@ import {
 } from "bun:test"
 import { Hono } from "hono"
 
+import { installModelsDevCatalog } from "~/lib/models-dev-cache"
 import { requestContext } from "~/lib/request-context"
 import { state } from "~/lib/state"
 import {
@@ -20,9 +21,17 @@ import {
   type TokenUsagePeriod,
   type TokenUsageSummary,
 } from "~/lib/token-usage"
-import { resolveTokenUsageCost } from "~/lib/token-usage/pricing"
+import {
+  dashscopePeakWindows,
+  deepseekPeakWindows,
+  isPeakPricingTime,
+  resolveTokenUsageCost,
+  type TokenUsageCostInput,
+} from "~/lib/token-usage/pricing"
 import { traceIdMiddleware } from "~/lib/trace"
 import { tokenUsageRoute } from "~/routes/token-usage/route"
+
+import { modelsDevCatalogFixture } from "./fixtures/models-dev-catalog"
 
 const DB_PATH_ENV = "COPILOT_API_SQLITE_DB_PATH"
 
@@ -69,6 +78,28 @@ function localDateLabel(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, "0")
   const day = String(date.getDate()).padStart(2, "0")
   return `${year}-${month}-${day}`
+}
+
+// 2026-09-14 is a Monday; 2026-09-19 is a Saturday. DeepSeek bills peak prices
+// on Beijing time 09:00-12:00 and 14:00-18:00 of weekdays (UTC 01:00-04:00 and
+// 06:00-10:00), while DashScope bills peak prices on UTC 00:00-14:00 daily.
+const deepseekPeakTime = new Date("2026-09-14T02:00:00.000Z")
+const deepseekOffPeakTime = new Date("2026-09-19T02:00:00.000Z")
+const dashscopePeakTime = new Date("2026-09-14T00:30:00.000Z")
+const dashscopeOffPeakTime = new Date("2026-09-14T15:00:00.000Z")
+
+function buildPricedUsage(
+  model: string,
+  providerName: string,
+): TokenUsageCostInput {
+  return {
+    cache_read_input_tokens: 2_000,
+    input_tokens: 1_000,
+    model,
+    output_tokens: 3_000,
+    providerName,
+    source: "provider",
+  }
 }
 
 describe("token usage storage", () => {
@@ -365,22 +396,29 @@ describe("token usage storage", () => {
     }
   })
 
-  test("prices OpenCode Go Hy3 and GPT-5.6 Luna with long-context tiers", () => {
-    const shortContextCosts = [
-      { model: "hy3", totalCostNanos: 1_950_000 },
-      { model: "gpt-5.6-luna", totalCostNanos: 2_045_000 },
-      { model: "qwen3.8-max", totalCostNanos: 23_000_000 },
+  test("prices GPT-6.1 Sol cache usage at the 272K input tier boundary", () => {
+    const expectedCosts = [
+      {
+        cache_creation_input_tokens: 1_000,
+        cache_read_input_tokens: 2_000,
+        input_tokens: 269_000,
+        totalCostNanos: 570_700_000,
+      },
+      {
+        cache_creation_input_tokens: 1_000,
+        cache_read_input_tokens: 2_000,
+        input_tokens: 269_001,
+        totalCostNanos: 1_126_404_000,
+      },
     ]
 
-    for (const { model, totalCostNanos } of shortContextCosts) {
+    for (const { totalCostNanos, ...usage } of expectedCosts) {
       expect(
         resolveTokenUsageCost({
-          cache_creation_input_tokens: 1_000,
-          cache_read_input_tokens: 2_000,
-          input_tokens: 1_000,
-          model,
+          ...usage,
+          model: "gpt-6.1-sol",
           output_tokens: 3_000,
-          providerName: "opencode-go",
+          providerName: "codex",
           source: "provider",
         }),
       ).toEqual({
@@ -389,22 +427,6 @@ describe("token usage storage", () => {
         total_cost_nanos: totalCostNanos,
       })
     }
-
-    expect(
-      resolveTokenUsageCost({
-        cache_creation_input_tokens: 2_000,
-        cache_read_input_tokens: 2_000,
-        input_tokens: 269_000,
-        model: "gpt-5.6-luna",
-        output_tokens: 3_000,
-        providerName: "opencode-go",
-        source: "provider",
-      }),
-    ).toEqual({
-      currency: "USD",
-      source: "builtin",
-      total_cost_nanos: 57_040_000,
-    })
   })
 
   test("prices DashScope Qwen3.8 Max with explicit cache prices", () => {
@@ -425,69 +447,167 @@ describe("token usage storage", () => {
     })
   })
 
-  test("prices DashScope DeepSeek V4 Flash 0731 with cached input", () => {
+  test("prices DashScope DeepSeek V4.1 Flash with peak and off-peak prices", () => {
+    const usage = buildPricedUsage("deepseek-v4.1-flash", "dashscope")
+
+    expect(resolveTokenUsageCost({ ...usage, at: dashscopePeakTime })).toEqual({
+      currency: "CNY",
+      source: "builtin",
+      total_cost_nanos: 26_400_000,
+    })
     expect(
-      resolveTokenUsageCost({
-        cache_read_input_tokens: 2_000,
-        input_tokens: 1_000,
-        model: "deepseek-v4-flash-0731",
-        output_tokens: 3_000,
-        providerName: "dashscope",
-        source: "provider",
-      }),
+      resolveTokenUsageCost({ ...usage, at: dashscopeOffPeakTime }),
     ).toEqual({
       currency: "CNY",
       source: "builtin",
-      total_cost_nanos: 7_400_000,
+      total_cost_nanos: 13_200_000,
     })
   })
 
-  test("prices DeepSeek models with peak-tier prices in CNY", () => {
+  test("prices DeepSeek models with peak and off-peak prices in CNY", () => {
     const expectedCosts = [
-      { model: "deepseek-v4-flash", totalCostNanos: 30_200_000 },
-      { model: "deepseek-v4-pro", totalCostNanos: 90_600_000 },
+      {
+        model: "deepseek-flash",
+        offPeakCostNanos: 13_040_000,
+        peakCostNanos: 26_080_000,
+      },
+      {
+        model: "deepseek-v4-pro",
+        offPeakCostNanos: 45_300_000,
+        peakCostNanos: 90_600_000,
+      },
     ]
 
-    for (const { model, totalCostNanos } of expectedCosts) {
+    for (const expected of expectedCosts) {
+      const usage = buildPricedUsage(expected.model, "deepseek")
+
+      expect(resolveTokenUsageCost({ ...usage, at: deepseekPeakTime })).toEqual(
+        {
+          currency: "CNY",
+          source: "builtin",
+          total_cost_nanos: expected.peakCostNanos,
+        },
+      )
       expect(
-        resolveTokenUsageCost({
-          cache_read_input_tokens: 2_000,
-          input_tokens: 1_000,
-          model,
-          output_tokens: 3_000,
-          providerName: "deepseek",
-          source: "provider",
-        }),
+        resolveTokenUsageCost({ ...usage, at: deepseekOffPeakTime }),
       ).toEqual({
         currency: "CNY",
         source: "builtin",
-        total_cost_nanos: totalCostNanos,
+        total_cost_nanos: expected.offPeakCostNanos,
       })
     }
   })
 
-  test("prices OpenCode Go DeepSeek models with catalog prices in USD", () => {
+  test("prices OpenCode Go models from the models.dev catalog in USD", () => {
+    installModelsDevCatalog(modelsDevCatalogFixture)
     const expectedCosts = [
-      { model: "deepseek-v4-flash", totalCostNanos: 2_214_000 },
-      { model: "deepseek-v4-pro", totalCostNanos: 6_644_000 },
+      {
+        model: "deepseek-v4.1-flash",
+        offPeakCostNanos: 1_956_000,
+        peakCostNanos: 1_956_000,
+      },
+      {
+        model: "deepseek-v4-pro",
+        offPeakCostNanos: 6_644_000,
+        peakCostNanos: 6_644_000,
+      },
     ]
 
-    for (const { model, totalCostNanos } of expectedCosts) {
+    for (const expected of expectedCosts) {
+      const usage = buildPricedUsage(expected.model, "opencode-go")
+
+      expect(resolveTokenUsageCost({ ...usage, at: deepseekPeakTime })).toEqual(
+        {
+          currency: "USD",
+          source: "builtin",
+          total_cost_nanos: expected.peakCostNanos,
+        },
+      )
       expect(
-        resolveTokenUsageCost({
-          cache_read_input_tokens: 2_000,
-          input_tokens: 1_000,
-          model,
-          output_tokens: 3_000,
-          providerName: "opencode-go",
-          source: "provider",
-        }),
+        resolveTokenUsageCost({ ...usage, at: deepseekOffPeakTime }),
       ).toEqual({
         currency: "USD",
         source: "builtin",
-        total_cost_nanos: totalCostNanos,
+        total_cost_nanos: expected.offPeakCostNanos,
       })
     }
+  })
+
+  test("treats DeepSeek peak windows as UTC weekday windows", () => {
+    expect(
+      isPeakPricingTime(deepseekPeakWindows, new Date("2026-09-18T00:59:00Z")),
+    ).toBe(false)
+    expect(
+      isPeakPricingTime(deepseekPeakWindows, new Date("2026-09-18T01:00:00Z")),
+    ).toBe(true)
+    expect(
+      isPeakPricingTime(deepseekPeakWindows, new Date("2026-09-18T03:59:00Z")),
+    ).toBe(true)
+    expect(
+      isPeakPricingTime(deepseekPeakWindows, new Date("2026-09-18T04:00:00Z")),
+    ).toBe(false)
+    expect(
+      isPeakPricingTime(deepseekPeakWindows, new Date("2026-09-18T09:59:00Z")),
+    ).toBe(true)
+    expect(
+      isPeakPricingTime(deepseekPeakWindows, new Date("2026-09-18T10:00:00Z")),
+    ).toBe(false)
+    expect(
+      isPeakPricingTime(deepseekPeakWindows, new Date("2026-09-19T02:00:00Z")),
+    ).toBe(false)
+    expect(
+      isPeakPricingTime(dashscopePeakWindows, new Date("2026-09-19T13:59:00Z")),
+    ).toBe(true)
+    expect(
+      isPeakPricingTime(dashscopePeakWindows, new Date("2026-09-19T14:00:00Z")),
+    ).toBe(false)
+  })
+
+  test("ignores off-peak prices when no peak window is configured", () => {
+    expect(
+      resolveTokenUsageCost({
+        at: deepseekOffPeakTime,
+        input_tokens: 1_000,
+        model: "custom-model",
+        output_tokens: 1_000,
+        pricing: {
+          input: 1,
+          offPeak: {
+            input: 0.1,
+            output: 0.2,
+          },
+          output: 2,
+        },
+        pricingCurrency: "USD",
+        providerName: "anthropic",
+        source: "provider",
+      }),
+    ).toEqual({
+      currency: "USD",
+      source: "config",
+      total_cost_nanos: 3_000_000,
+    })
+  })
+
+  test("records off-peak DeepSeek costs using the record time", async () => {
+    setSystemTime(deepseekOffPeakTime)
+    recordTokenUsageEvent({
+      cache_read_input_tokens: 2_000,
+      endpoint: "provider_messages",
+      input_tokens: 1_000,
+      model: "deepseek-flash",
+      output_tokens: 3_000,
+      providerName: "deepseek",
+      source: "provider",
+    })
+
+    const page = await fetchEventsPage()
+    expect(page.items[0]?.cost).toEqual({
+      amount: 0.01304,
+      currency: "CNY",
+      source: "builtin",
+      total_cost_nanos: 13_040_000,
+    })
   })
 
   test("prices Kimi models in USD and DashScope Kimi in CNY", () => {
@@ -639,6 +759,42 @@ describe("token usage storage", () => {
     )
     const events = (await eventsResponse.json()) as TokenUsageEventsPage
     expect(events.total).toBe(4)
+  })
+
+  test("buckets daily usage by runtime local days when SQLite uses another timezone", async () => {
+    // Changing TZ at runtime moves the JavaScript timezone but not SQLite's
+    // 'localtime', reproducing hosts where the two disagree.
+    const originalTz = process.env.TZ
+    const originalZone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    process.env.TZ = "Pacific/Kiritimati"
+    try {
+      setSystemTime(localDate(2026, 4, 1, 0))
+      recordTokenUsageEvent({
+        endpoint: "responses",
+        input_tokens: 3,
+        model: "day-start",
+        source: "copilot",
+      })
+      setSystemTime(localDate(2026, 4, 2))
+
+      const response = await createTokenUsageApp().request(
+        "/token-usage/daily?period=this_month",
+      )
+      const daily = (await response.json()) as TokenUsageDailySummary
+
+      expect(daily.days.map((day) => day.date)).toEqual([
+        "2026-05-01",
+        "2026-05-02",
+      ])
+      expect(daily.days[0]?.totals.input_tokens).toBe(3)
+      expect(daily.days[0]?.byModel.map((model) => model.model)).toEqual([
+        "day-start",
+      ])
+    } finally {
+      // Deleting TZ alone keeps the current zone, so restore it explicitly.
+      process.env.TZ = originalTz ?? originalZone
+      if (originalTz === undefined) Reflect.deleteProperty(process.env, "TZ")
+    }
   })
 
   test("returns an empty lifetime range when there are no events", async () => {

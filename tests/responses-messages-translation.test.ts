@@ -1,12 +1,18 @@
 import { describe, expect, test } from "bun:test"
 
-import type { AnthropicResponse } from "~/lib/types/anthropic"
+import type {
+  AnthropicMessagesPayload,
+  AnthropicResponse,
+  AnthropicTextBlock,
+} from "~/lib/types/anthropic"
 import type {
   ResponsesPayload,
   ResponseStreamEvent,
 } from "~/lib/types/responses"
 import { requestContext } from "~/lib/request-context"
 import {
+  buildOutputFormatInstruction,
+  createMessagesBackedResponsesResult,
   decodeMessagesCompaction,
   encodeMessagesCompaction,
   MESSAGES_COMPACTION_PREFIX,
@@ -19,6 +25,8 @@ import {
   responsesResultToStreamEvents,
   translateMessagesStream,
 } from "~/routes/responses/messages-stream-translation"
+import { translateAnthropicMessagesToResponsesPayload } from "~/routes/messages/responses-translation"
+import { translateToOpenAI } from "~/routes/messages/non-stream-translation"
 
 const translate = (
   payload: Omit<ResponsesPayload, "model">,
@@ -32,6 +40,19 @@ const translate = (
 const translateWithTips = (payload: Omit<ResponsesPayload, "model">) =>
   translate(payload, { toolCallTips: true })
 
+const trailingUserMessageText = (
+  translation: ReturnType<typeof translate>,
+): string => {
+  const lastMessage = translation.messagesPayload.messages.at(-1)
+  expect(lastMessage?.role).toBe("user")
+  if (!lastMessage || !Array.isArray(lastMessage.content)) {
+    throw new Error("Expected the trailing message to carry block content")
+  }
+  return lastMessage.content
+    .map((block) => ("text" in block ? block.text : ""))
+    .join("")
+}
+
 const expectCanonicalBase64 = (value: string | undefined) => {
   expect(value).toBeTruthy()
   if (!value) return
@@ -42,6 +63,12 @@ describe("Responses Lite to Messages translation", () => {
   test("includes yielded execution resume guidance in tool call tips", () => {
     expect(MESSAGES_TOOL_CALL_TIPS).toContain(
       "- Yielded execution is not truncated output. Resume a running `cell_id` with `functions.wait`, and a live `session_id` with `tools.write_stdin`, until the command reaches a terminal result.",
+    )
+  })
+
+  test("includes aborted exec retry guidance in tool call tips", () => {
+    expect(MESSAGES_TOOL_CALL_TIPS).toContain(
+      "- If `functions__exec` returns `aborted`, retry at most 3 times. After 3 failures, terminate immediately and inform the user that `functions__exec` is unavailable.",
     )
   })
 
@@ -214,6 +241,61 @@ describe("Responses Lite to Messages translation", () => {
         cache_control: { type: "ephemeral" },
       },
     ])
+  })
+
+  test.each([undefined, "Base instructions"])(
+    "adds Promise.allSettled guidance when parallel tool calls are disabled with instructions %j",
+    (instructions) => {
+      const result = translateWithTips({
+        instructions,
+        input: "Hello",
+        parallel_tool_calls: false,
+      })
+
+      expect(Array.isArray(result.messagesPayload.system)).toBe(true)
+      const system = result.messagesPayload.system as Array<AnthropicTextBlock>
+      expect(system).toHaveLength(1)
+      expect(system[0].text).toContain(MESSAGES_TOOL_CALL_TIPS)
+      expect(system[0].text).toContain(
+        "Parallel tool calls are disabled for this request.",
+      )
+      expect(system[0].text).toContain(
+        'await Promise.allSettled([tools.exec_command({cmd: "git status --short"})])',
+      )
+      expect(system[0].text).toContain(
+        "]); for (const result of results) text(",
+      )
+      expect(system[0].text).toContain('result.status === "fulfilled"')
+      expect(system[0].text).toContain("{error: String(result.reason)}")
+      expect(system[0].text).toContain("text(JSON.stringify(result.status")
+      expect(system[0].text).not.toContain("```")
+      expect(system[0]).toHaveProperty("cache_control", { type: "ephemeral" })
+      if (instructions) expect(system[0].text).toContain(instructions)
+    },
+  )
+
+  test.each([true, undefined, null])(
+    "omits Promise.allSettled guidance for parallel_tool_calls %j",
+    (parallelToolCalls) => {
+      const result = translateWithTips({
+        input: "Hello",
+        parallel_tool_calls: parallelToolCalls,
+      })
+
+      expect(result.messagesPayload.system).toEqual([
+        {
+          type: "text",
+          text: MESSAGES_TOOL_CALL_TIPS,
+          cache_control: { type: "ephemeral" },
+        },
+      ])
+    },
+  )
+
+  test("omits batching guidance when tool call tips are disabled", () => {
+    const result = translate({ input: "Hello", parallel_tool_calls: false })
+
+    expect(result.messagesPayload.system).toBeUndefined()
   })
 
   test("omits tool call tips unless enabled", () => {
@@ -458,6 +540,236 @@ describe("Responses Lite to Messages translation", () => {
     expect(decodeMessagesCompaction(encoded)).toBe(summary)
     expect(decodeMessagesCompaction(legacy)).toBe(summary)
     expect(decodeMessagesCompaction("not base64")).toBeNull()
+  })
+
+  test("removes built-in web search while preserving other top-level tools", () => {
+    const tools: NonNullable<ResponsesPayload["tools"]> = [
+      { type: "function", name: "web_search", parameters: null, strict: null },
+      { type: "custom", name: "apply_patch" },
+      {
+        type: "namespace",
+        name: "web_search",
+        tools: [
+          { type: "function", name: "run", parameters: null, strict: null },
+        ],
+      },
+    ]
+    const result = translate({
+      input: "Hello",
+      tools: [{ type: "web_search" }, ...tools],
+    })
+
+    expect(result.originalPayload.tools).toEqual(tools)
+    expect(result.messagesPayload.tools?.map((tool) => tool.name)).toEqual([
+      "web_search",
+      "apply_patch",
+      "web_search__run",
+    ])
+  })
+
+  test("omits Messages tools and tool choice after removing the only tool", () => {
+    const result = translate({
+      input: "Hello",
+      tools: [{ type: "web_search" }],
+      tool_choice: "required",
+    })
+
+    expect(result.originalPayload.tools).toEqual([])
+    expect(result.originalPayload.tool_choice).toBe("required")
+    expect(result.messagesPayload.tools).toBeUndefined()
+    expect(result.messagesPayload.tool_choice).toBeUndefined()
+  })
+
+  test("still rejects web search tools in input.additional_tools", () => {
+    const payload: ResponsesPayload = {
+      model: "claude-sonnet-4.6",
+      input: [
+        {
+          role: "developer",
+          type: "additional_tools",
+          tools: [{ type: "web_search" }],
+        },
+        { role: "user", type: "message", content: "Hello" },
+      ],
+      tools: [{ type: "web_search" }],
+    }
+    const originalInput = structuredClone(payload.input)
+
+    expect(() =>
+      translateResponsesToMessages(payload, { model: payload.model }),
+    ).toThrow("does not support tool 'web_search'")
+    expect(payload.tools).toEqual([])
+    expect(payload.input).toEqual(originalInput)
+  })
+
+  test("omits tool_choice without registered tools and preserves the request", () => {
+    const choices: Array<NonNullable<ResponsesPayload["tool_choice"]>> = [
+      "auto",
+      "none",
+      "required",
+      { type: "function", name: "getWeather" },
+      { type: "custom", name: "apply_patch" },
+    ]
+
+    for (const tools of [undefined, null, []]) {
+      for (const toolChoice of choices) {
+        const payload: ResponsesPayload = {
+          model: "claude-sonnet-4.6",
+          input: "Hello",
+          tools,
+          tool_choice: toolChoice,
+        }
+        const result = translateResponsesToMessages(payload, {
+          model: payload.model,
+        })
+
+        expect(result.messagesPayload.tools).toBeUndefined()
+        expect(result.messagesPayload.tool_choice).toBeUndefined()
+        expect(
+          JSON.parse(JSON.stringify(result.messagesPayload)),
+        ).not.toHaveProperty("tool_choice")
+        expect(payload.tool_choice).toEqual(toolChoice)
+        expect(result.originalPayload.tool_choice).toEqual(toolChoice)
+      }
+    }
+  })
+
+  test("preserves the original tool choice in Responses results without tools", () => {
+    const translation = translate({ input: "Hello", tool_choice: "none" })
+    const result = createMessagesBackedResponsesResult({
+      context: translation,
+      id: "resp_no_tools",
+      output: [],
+      outputText: "",
+      status: "completed",
+    })
+
+    expect(result.tool_choice).toBe("none")
+  })
+
+  test.each([false, true])(
+    "preserves parallel_tool_calls %j through serialized Messages requests",
+    (parallelToolCalls) => {
+      for (const toolChoice of [
+        undefined,
+        "auto",
+        "required",
+        { type: "function", name: "getWeather" },
+        { type: "custom", name: "apply_patch" },
+      ] as const) {
+        const translation = translate({
+          input: "Check the weather",
+          tools: [
+            { type: "function", name: "getWeather", parameters: null },
+            { type: "custom", name: "apply_patch" },
+          ],
+          tool_choice: toolChoice,
+          parallel_tool_calls: parallelToolCalls,
+        })
+        const messagesPayload = JSON.parse(
+          JSON.stringify(translation.messagesPayload),
+        ) as AnthropicMessagesPayload
+
+        expect(messagesPayload.tool_choice?.disable_parallel_tool_use).toBe(
+          !parallelToolCalls,
+        )
+        if (toolChoice && typeof toolChoice === "object") {
+          expect(messagesPayload.tool_choice?.name).toBe(toolChoice.name)
+        } else {
+          expect(messagesPayload.tool_choice?.type).toBe(
+            toolChoice === "required" ? "any" : "auto",
+          )
+        }
+        expect(
+          translateAnthropicMessagesToResponsesPayload(messagesPayload)
+            .parallel_tool_calls,
+        ).toBe(parallelToolCalls)
+      }
+    },
+  )
+
+  test.each([undefined, null])(
+    "leaves the default parallel tool behavior unchanged for %j",
+    (parallelToolCalls) => {
+      const translation = translate({
+        input: "Check the weather",
+        tools: [{ type: "function", name: "getWeather", parameters: null }],
+        parallel_tool_calls: parallelToolCalls,
+      })
+
+      expect(translation.messagesPayload.tool_choice).toBeUndefined()
+      expect(
+        translateAnthropicMessagesToResponsesPayload(
+          translation.messagesPayload,
+        ).parallel_tool_calls,
+      ).toBe(true)
+    },
+  )
+
+  test("does not add parallel tool settings when tools cannot be called", () => {
+    const withoutTools = translate({
+      input: "Hello",
+      parallel_tool_calls: false,
+    })
+    const withoutToolUse = translate({
+      input: "Hello",
+      tools: [{ type: "function", name: "getWeather", parameters: null }],
+      tool_choice: "none",
+      parallel_tool_calls: false,
+    })
+
+    expect(withoutTools.messagesPayload.tool_choice).toBeUndefined()
+    expect(withoutToolUse.messagesPayload.tool_choice).toEqual({ type: "none" })
+  })
+
+  test.each([false, true])(
+    "preserves parallel_tool_calls %j through Chat Completions translation",
+    (parallelToolCalls) => {
+      const translation = translate({
+        input: "Check the weather",
+        tools: [{ type: "function", name: "getWeather", parameters: null }],
+        parallel_tool_calls: parallelToolCalls,
+      })
+      const openAIPayload = translateToOpenAI(translation.messagesPayload)
+
+      expect(openAIPayload.parallel_tool_calls).toBe(parallelToolCalls)
+      expect(Object.hasOwn(openAIPayload, "parallel_tool_calls")).toBe(true)
+    },
+  )
+
+  test("keeps named tool choices for top-level tools", () => {
+    const result = translate({
+      input: "Check the weather",
+      tools: [{ type: "function", name: "getWeather", parameters: null }],
+      tool_choice: { type: "function", name: "getWeather" },
+    })
+
+    expect(result.messagesPayload.tool_choice).toEqual({
+      type: "tool",
+      name: "getWeather",
+    })
+  })
+
+  test("keeps required and disabled choices for input tools with empty top-level tools", () => {
+    for (const toolChoice of ["required", "none"] as const) {
+      const result = translate({
+        input: [
+          {
+            role: "developer",
+            type: "additional_tools",
+            tools: [{ type: "custom", name: "apply_patch" }],
+          },
+          { role: "user", content: "Update the file", type: "message" },
+        ],
+        tools: [],
+        tool_choice: toolChoice,
+      })
+
+      expect(result.messagesPayload.tools?.[0]?.name).toBe("apply_patch")
+      expect(result.messagesPayload.tool_choice).toEqual({
+        type: toolChoice === "required" ? "any" : "none",
+      })
+    }
   })
 
   test("loads custom tools from input.additional_tools", () => {
@@ -914,6 +1226,143 @@ describe("Responses Lite to Messages translation", () => {
       translate({ input: "hello", reasoning: { effort: "max" } })
         .messagesPayload.output_config,
     ).toEqual({ effort: "max" })
+  })
+
+  test("appends a JSON schema instruction as the trailing user message", () => {
+    const translation = translate({
+      input: [{ role: "user", content: "Give me a title", type: "message" }],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "codex_output_schema",
+          strict: true,
+          schema: {
+            type: "object",
+            properties: {
+              title: { type: "string", minLength: 1, maxLength: 36 },
+            },
+            required: ["title"],
+            additionalProperties: false,
+          },
+        },
+      },
+    })
+
+    const text = trailingUserMessageText(translation)
+    expect(text).toContain('"codex_output_schema"')
+    expect(text).toContain('"minLength": 1')
+    expect(text).toContain("Do not wrap the JSON")
+    expect(text).not.toContain("Do not call any tools")
+  })
+
+  test("preserves tool_choice for schema output with registered tools", () => {
+    for (const toolChoice of ["auto", "required"] as const) {
+      const translation = translate({
+        input: [{ role: "user", content: "Give me a title", type: "message" }],
+        tools: [{ type: "function", name: "getWeather", parameters: null }],
+        tool_choice: toolChoice,
+        text: {
+          format: {
+            type: "json_schema",
+            name: "codex_output_schema",
+            strict: true,
+            schema: {
+              type: "object",
+              properties: { title: { type: "string" } },
+              required: ["title"],
+              additionalProperties: false,
+            },
+          },
+        },
+      })
+
+      expect(translation.messagesPayload.tools).toHaveLength(1)
+      expect(translation.messagesPayload.tool_choice).toEqual({
+        type: toolChoice === "required" ? "any" : toolChoice,
+      })
+      const text = trailingUserMessageText(translation)
+      expect(text).toContain('"codex_output_schema"')
+      expect(text).not.toContain("Do not call any tools")
+    }
+  })
+
+  test("appends a JSON object instruction for json_object formats", () => {
+    const translation = translate({
+      input: "Give me a title",
+      text: { format: { type: "json_object" } },
+    })
+
+    const text = trailingUserMessageText(translation)
+    expect(text).toContain("Respond with a single JSON object.")
+    expect(text).not.toContain("Do not call any tools")
+    expect(text).not.toContain("JSON schema:")
+  })
+
+  test("keeps tool call tips when a text format is specified", () => {
+    for (const format of [
+      {
+        type: "json_schema",
+        name: "codex_output_schema",
+        schema: { type: "object" },
+      },
+      { type: "json_object" },
+      { type: "text" },
+    ] as const) {
+      const withFormat = translateWithTips({
+        input: "Give me a title",
+        tools: [{ type: "function", name: "getWeather", parameters: null }],
+        text: { format },
+      })
+
+      expect(JSON.stringify(withFormat.messagesPayload.system ?? "")).toContain(
+        "# Tool Call Tips",
+      )
+    }
+
+    const withoutFormat = translateWithTips({ input: "Give me a title" })
+    expect(
+      JSON.stringify(withoutFormat.messagesPayload.system ?? ""),
+    ).toContain("# Tool Call Tips")
+  })
+
+  test("builds instructions for JSON formats and ignores text formats", () => {
+    expect(
+      buildOutputFormatInstruction({
+        type: "json_schema",
+        name: "codex_output_schema",
+        schema: { type: "object" },
+      }),
+    ).toContain('"codex_output_schema"')
+    expect(
+      buildOutputFormatInstruction({
+        type: "json_object",
+      }),
+    ).toContain("Respond with a single JSON object.")
+    expect(buildOutputFormatInstruction({ type: "text" })).toBeNull()
+    expect(buildOutputFormatInstruction(null)).toBeNull()
+    expect(buildOutputFormatInstruction(undefined)).toBeNull()
+  })
+
+  test("keeps tools available for text formats without instructions", () => {
+    const plainText = translate({
+      input: "hello",
+      tools: [{ type: "function", name: "getWeather", parameters: null }],
+      tool_choice: "auto",
+      text: { format: { type: "text" } },
+    })
+    expect(plainText.messagesPayload.tools).toHaveLength(1)
+    expect(plainText.messagesPayload.tool_choice).toEqual({ type: "auto" })
+    expect(trailingUserMessageText(plainText)).toBe("hello")
+
+    const emptyFormat = translate({
+      input: "hello",
+      text: { format: null },
+    })
+    expect(emptyFormat.messagesPayload.messages).toHaveLength(1)
+    expect(emptyFormat.messagesPayload.tool_choice).toBeUndefined()
+
+    const noTextConfig = translate({ input: "hello" })
+    expect(noTextConfig.messagesPayload.messages).toHaveLength(1)
   })
 
   test("marks reasoning translated from a Messages response", () => {

@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto"
 
+import { builtinProviderModelRegistry } from "~/lib/builtin-provider-models"
 import { compactTextOnlyGuard } from "~/lib/compact"
+import { findEndpointModel } from "~/lib/models"
+import { getModelsDevModelMaxOutputTokens } from "~/lib/models-dev-cache"
+import { getRawProviderConfig } from "~/lib/provider-config"
+import { parseProviderModelAlias } from "~/lib/provider-model"
 import { requestContext } from "~/lib/request-context"
 import type {
   AnthropicAssistantContentBlock,
@@ -30,6 +35,7 @@ import type {
   Reasoning,
   ResponsesPayload,
   ResponsesResult,
+  ResponsesTextFormat,
   ResponseUsage,
 } from "~/lib/types/responses"
 
@@ -66,7 +72,40 @@ export const MESSAGES_TOOL_CALL_TIPS = [
   "- Yielded execution is not truncated output. Resume a running `cell_id` with `functions.wait`, and a live `session_id` with `tools.write_stdin`, until the command reaches a terminal result.",
   "- Read files with the OS-native command (Get-Content/Test-Path on Windows PowerShell, cat/ls on POSIX), quote paths containing spaces, and verify the forwarded output is non-empty before concluding a file was read.",
   "- For long-running commands, keep the returned `session_id` and poll it with `tools.write_stdin` until the command finishes; do not redirect output to a temp file and read it back in a second call.",
+  "- If `functions__exec` returns `aborted`, retry at most 3 times. After 3 failures, terminate immediately and inform the user that `functions__exec` is unavailable.",
 ].join("\n")
+
+const MESSAGES_BATCH_TOOL_CALL_TIPS = [
+  "- Parallel tool calls are disabled for this request. Batch independent commands in one functions__exec call; keep dependent operations sequential.",
+  'const results = await Promise.allSettled([tools.exec_command({cmd: "git status --short"})]); for (const result of results) text(JSON.stringify(result.status === "fulfilled" ? result.value : {error: String(result.reason)}))',
+].join("\n")
+
+const JSON_OUTPUT_CONSTRAINT =
+  "Do not wrap the JSON in markdown code fences and do not add any text outside the JSON object."
+
+export const buildOutputFormatInstruction = (
+  format: ResponsesTextFormat | null | undefined,
+): string | null => {
+  if (!format) return null
+
+  if (format.type === "json_schema") {
+    return [
+      `Respond with a single JSON object that strictly matches the "${format.name}" JSON schema below.`,
+      JSON_OUTPUT_CONSTRAINT,
+      "",
+      "JSON schema:",
+      JSON.stringify(format.schema, null, 2),
+    ].join("\n")
+  }
+
+  if (format.type === "json_object") {
+    return ["Respond with a single JSON object.", JSON_OUTPUT_CONSTRAINT].join(
+      "\n",
+    )
+  }
+
+  return null
+}
 
 const COMPACTION_REPLAY_PROMPT =
   "The previous conversation was compacted. Continue from this handoff summary:\n\n"
@@ -132,8 +171,12 @@ export function translateResponsesToMessages(
   payload: ResponsesPayload,
   options: { model: string; publicModel?: string; toolCallTips?: boolean },
 ): ResponsesToMessagesTranslation {
+  removeWebSearchTool(payload)
   const registry = createToolRegistry(payload)
   const normalized = normalizeResponsesInput(payload.input)
+  const outputFormatInstruction = buildOutputFormatInstruction(
+    payload.text?.format,
+  )
   const { messages, system } = translateInputToAnthropic(
     normalized.input,
     registry,
@@ -141,6 +184,10 @@ export function translateResponsesToMessages(
     payload.input,
     options.toolCallTips ?? false,
   )
+
+  if (options.toolCallTips && payload.parallel_tool_calls === false) {
+    appendToolCallTips(system, MESSAGES_BATCH_TOOL_CALL_TIPS)
+  }
 
   if (normalized.compaction) {
     messages.push({ role: "user", content: MESSAGES_COMPACTION_PROMPT })
@@ -152,6 +199,10 @@ export function translateResponsesToMessages(
     )
   }
 
+  if (outputFormatInstruction) {
+    messages.push({ role: "user", content: outputFormatInstruction })
+  }
+
   applyEphemeralCacheControl(messages, system)
 
   const reasoningEffort = translateReasoningEffort(payload.reasoning?.effort)
@@ -159,7 +210,12 @@ export function translateResponsesToMessages(
   const messagesPayload: AnthropicMessagesPayload = {
     model: options.model,
     messages,
-    max_tokens: Math.max(1, payload.max_output_tokens ?? 32_000),
+    // Codex does not send the catalog's max_output_tokens; Messages requires
+    // an explicit max_tokens value, so resolve the default in the adapter.
+    max_tokens: Math.max(
+      1,
+      payload.max_output_tokens ?? resolveDefaultMaxOutputTokens(options.model),
+    ),
     stream: payload.stream ?? false,
     temperature: payload.temperature ?? undefined,
     top_p: payload.top_p ?? undefined,
@@ -179,6 +235,17 @@ export function translateResponsesToMessages(
     ...(metadataUserId ? { metadata: { user_id: metadataUserId } } : {}),
   }
 
+  if (
+    payload.parallel_tool_calls != null
+    && registry.tools.length > 0
+    && messagesPayload.tool_choice?.type !== "none"
+  ) {
+    messagesPayload.tool_choice = {
+      ...(messagesPayload.tool_choice ?? { type: "auto" }),
+      disable_parallel_tool_use: !payload.parallel_tool_calls,
+    }
+  }
+
   return {
     compaction: normalized.compaction,
     messagesPayload,
@@ -186,6 +253,37 @@ export function translateResponsesToMessages(
     publicModel: options.publicModel ?? payload.model,
     registry,
   }
+}
+
+function resolveDefaultMaxOutputTokens(model: string): number {
+  const alias = parseProviderModelAlias(model)
+  const providerConfig = alias ? getRawProviderConfig(alias.provider) : null
+  const catalogMaxOutputTokens =
+    alias ?
+      getModelsDevModelMaxOutputTokens(
+        providerConfig?.modelsDevProviderId || alias.provider,
+        alias.model,
+      )
+    : undefined
+  const builtinModelConfig =
+    alias ?
+      builtinProviderModelRegistry.getModelConfig(alias.provider, alias.model)
+    : undefined
+  const tokenLimits =
+    alias && (providerConfig || builtinModelConfig || catalogMaxOutputTokens) ?
+      [
+        providerConfig?.models?.[alias.model]?.maxOutputTokens,
+        catalogMaxOutputTokens,
+        builtinModelConfig?.maxOutputTokens,
+      ]
+    : [findEndpointModel(model)?.capabilities.limits.max_output_tokens]
+
+  return (
+    tokenLimits.find(
+      (limit): limit is number =>
+        typeof limit === "number" && Number.isInteger(limit) && limit > 0,
+    ) ?? 32_000
+  )
 }
 
 export function translateAnthropicToResponses(
@@ -371,6 +469,12 @@ function normalizeResponsesInput(
   }
 }
 
+function removeWebSearchTool(payload: ResponsesPayload): void {
+  if (!Array.isArray(payload.tools) || payload.tools.length === 0) return
+
+  payload.tools = payload.tools.filter((tool) => tool.type !== "web_search")
+}
+
 function createToolRegistry(payload: ResponsesPayload): MessagesToolRegistry {
   const registry: MessagesToolRegistry = {
     byAlias: new Map(),
@@ -521,13 +625,16 @@ function translateInputToAnthropic(
   return { messages, system }
 }
 
-function appendToolCallTips(system: Array<AnthropicTextBlock>): void {
+function appendToolCallTips(
+  system: Array<AnthropicTextBlock>,
+  tips = MESSAGES_TOOL_CALL_TIPS,
+): void {
   const lastSystemBlock = system.at(-1)
   if (!lastSystemBlock) {
-    system.push({ type: "text", text: MESSAGES_TOOL_CALL_TIPS })
+    system.push({ type: "text", text: tips })
     return
   }
-  lastSystemBlock.text = `${lastSystemBlock.text}\n\n${MESSAGES_TOOL_CALL_TIPS}`
+  lastSystemBlock.text = `${lastSystemBlock.text}\n\n${tips}`
 }
 
 function translateInputItems(
@@ -918,7 +1025,7 @@ function translateToolChoice(
   toolChoice: ResponsesPayload["tool_choice"],
   registry: MessagesToolRegistry,
 ): AnthropicMessagesPayload["tool_choice"] {
-  if (!toolChoice) return undefined
+  if (!toolChoice || registry.tools.length === 0) return undefined
   if (typeof toolChoice === "string") {
     if (toolChoice === "required") return { type: "any" }
     return { type: toolChoice }

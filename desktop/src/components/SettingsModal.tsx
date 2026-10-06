@@ -10,12 +10,15 @@ import { useLanguage } from '../contexts/LanguageContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { translate, type LangPreference } from '../locales'
 import { isValidServerHost } from '../lib/server-url'
+import AppUpdatePanel from './AppUpdatePanel'
 
 interface SettingsModalProps {
   onClose: () => void
+  initialSection?: Section
+  checkForUpdatesOnOpen?: boolean
 }
 
-type Section = 'general' | 'security' | 'network' | 'startup'
+type Section = 'general' | 'security' | 'network' | 'startup' | 'updates'
 
 // Matches the normalization applied by the main process before persisting,
 // so cosmetic edits (e.g. a trailing newline) do not count as changes.
@@ -36,6 +39,7 @@ function requiresAppRestart(
 ): boolean {
   return (
     previous.apiHome !== next.apiHome
+    || previous.sqliteDbPath !== next.sqliteDbPath
     || previous.oauthApp !== next.oauthApp
     || previous.enterpriseUrl !== next.enterpriseUrl
   )
@@ -230,12 +234,17 @@ const IconSecurity = () => (
   </svg>
 )
 
-export default function SettingsModal({ onClose }: SettingsModalProps) {
+export default function SettingsModal({
+  onClose,
+  initialSection = 'general',
+  checkForUpdatesOnOpen = false,
+}: SettingsModalProps) {
   const { t, setLangPref } = useLanguage()
   const { setThemePref } = useTheme()
-  const [section, setSection] = useState<Section>('general')
+  const [section, setSection] = useState<Section>(initialSection)
   const [settings, setSettings] = useState<DesktopSettings>({
     apiHome: '',
+    sqliteDbPath: '',
     oauthApp: 'default',
     enterpriseUrl: '',
     host: '',
@@ -292,6 +301,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
       const nextApiKeys = normalizeServerKeysText(apiKeysText)
       const nextAdminApiKey = adminApiKey.trim()
       const serverKeysUpdate: ServerKeysConfigUpdate = {}
+      const saveErrors: string[] = []
       if (
         loadedServerKeys !== null
         && nextApiKeys.join('\n') !== loadedServerKeys.apiKeys.join('\n')
@@ -309,14 +319,29 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
         loadedServerKeys !== null
         && Object.keys(serverKeysUpdate).length > 0
       ) {
-        const savedKeys =
-          await window.electronAPI.saveServerKeys(serverKeysUpdate)
-        setApiKeysText(savedKeys.apiKeys.join('\n'))
-        setAdminApiKey(savedKeys.adminApiKey)
-        setLoadedServerKeys(savedKeys)
+        try {
+          const savedKeys =
+            await window.electronAPI.saveServerKeys(serverKeysUpdate)
+          setApiKeysText(savedKeys.apiKeys.join('\n'))
+          setAdminApiKey(savedKeys.adminApiKey)
+          setLoadedServerKeys(savedKeys)
+        } catch (error) {
+          saveErrors.push(
+            `${t('settings.serverKeysSaveFailed')}: ${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
       }
 
-      await window.electronAPI.saveSettings(settings)
+      try {
+        await window.electronAPI.saveSettings(settings)
+      } catch (error) {
+        saveErrors.push(
+          `${t('settings.desktopSettingsSaveFailed')}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      if (saveErrors.length > 0) {
+        throw new Error(saveErrors.join('\n'))
+      }
       setLangPref(settings.language)
       setThemePref(settings.theme)
 
@@ -389,6 +414,11 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
       key: 'startup',
       label: t('settings.sectionStartup'),
       icon: <IconStartup />,
+    },
+    {
+      key: 'updates',
+      label: t('updates.title'),
+      icon: <IconMonitor />,
     },
   ]
 
@@ -468,6 +498,9 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
 
           {/* Right panel */}
           <div className="flex-1 overflow-y-auto px-6 py-5 dark:bg-[#141419]">
+            {section === 'updates' && (
+              <AppUpdatePanel checkOnMount={checkForUpdatesOnOpen} />
+            )}
             {section === 'general' && (
               <div>
                 <div className="mb-1">
@@ -748,6 +781,26 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                   />
                   <p className="text-[12px] text-ink-faint mt-1.5 leading-relaxed">
                     {t('settings.apiHomeDesc')}
+                  </p>
+                </div>
+                <div className="mb-4">
+                  <div className="text-[13px] font-medium text-ink mb-1.5">
+                    {t('settings.sqliteDbPath')}
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="C:/copilot-api/copilot-api.sqlite"
+                    value={settings.sqliteDbPath}
+                    onChange={(e) =>
+                      setSettings((s) => ({
+                        ...s,
+                        sqliteDbPath: e.target.value,
+                      }))
+                    }
+                    className={inputClass}
+                  />
+                  <p className="text-[12px] text-ink-faint mt-1.5 leading-relaxed">
+                    {t('settings.sqliteDbPathDesc')}
                   </p>
                 </div>
                 <div className="mb-4">

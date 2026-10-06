@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
 import { Hono } from "hono"
 
 import type { ResolvedProviderConfig } from "~/lib/config"
@@ -45,6 +53,11 @@ await mock.module("~/lib/token-usage", () => ({
 }))
 
 const { messageRoutes } = await import("~/routes/messages/route")
+const { providerMessageRoutes } = await import(
+  "~/routes/provider/messages/route"
+)
+const { messagesFlowHandlers } = await import("~/routes/messages/handler")
+const { state } = await import("~/lib/state")
 const { resolveCountTokensModel } = await import(
   "~/routes/messages/count-tokens-handler"
 )
@@ -88,6 +101,7 @@ const fetchMock = mock((_url: string | URL | Request, _init?: RequestInit) =>
 const createApp = () => {
   const app = new Hono()
   app.route("/v1/messages", messageRoutes)
+  app.route("/:provider/v1/messages", providerMessageRoutes)
   return app
 }
 
@@ -119,6 +133,125 @@ afterEach(() => {
 })
 
 describe("provider/model aliases on top-level messages routes", () => {
+  test.each([
+    { path: "/v1/messages", model: "dash/my-claude-qwen-plus" },
+    { path: "/dash/v1/messages", model: "my-claude-qwen-plus" },
+    { path: "/v1/messages", model: "dash/my-claude-qwen-plus[1m]" },
+    { path: "/dash/v1/messages", model: "my-claude-qwen-plus[1m]" },
+  ])(
+    "restores discovery IDs on $path before provider dispatch",
+    async ({ path, model }) => {
+      const response = await createApp().request(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model,
+          max_tokens: 128,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      })
+      expect(response.status).toBe(200)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const [url, init] = fetchMock.mock.calls[0]
+      expect(url).toBe(
+        "https://dashscope.example/compatible-mode/v1/chat/completions",
+      )
+      const upstream = JSON.parse(init?.body as string) as {
+        model: string
+        temperature: number
+      }
+      expect(upstream.model).toBe("qwen-plus")
+      expect(upstream.temperature).toBe(0.2)
+    },
+  )
+
+  test.each([
+    { path: "/v1/messages/count_tokens", model: "dash/my-claude-qwen-plus" },
+    { path: "/dash/v1/messages/count_tokens", model: "my-claude-qwen-plus" },
+    {
+      path: "/v1/messages/count_tokens",
+      model: "dash/my-claude-qwen-plus[1m]",
+    },
+    {
+      path: "/dash/v1/messages/count_tokens",
+      model: "my-claude-qwen-plus[1m]",
+    },
+  ])(
+    "restores discovery IDs on $path before token counting",
+    async ({ path, model }) => {
+      const response = await createApp().request(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model,
+          max_tokens: 128,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ input_tokens: 42 })
+      const [payload, selectedModel] = getTokenCount.mock.calls[0]
+      expect(payload.model).toBe("qwen-plus")
+      expect(selectedModel.id).toBe("qwen-plus")
+      expect(fetchMock).not.toHaveBeenCalled()
+    },
+  )
+
+  test.each(["/v1/messages", "/v1/messages/count_tokens"])(
+    "applies model mappings after restoring discovery IDs on %s",
+    async (path) => {
+      modelMappings = { friendly: "dash/qwen-plus" }
+      const response = await createApp().request(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "my-claude-friendly[1m]",
+          max_tokens: 128,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      })
+      expect(response.status).toBe(200)
+      if (path.endsWith("count_tokens")) {
+        expect(getTokenCount.mock.calls[0][0].model).toBe("qwen-plus")
+        expect(getTokenCount.mock.calls[0][1].id).toBe("qwen-plus")
+      } else {
+        const upstream = JSON.parse(
+          fetchMock.mock.calls[0][1]?.body as string,
+        ) as {
+          model: string
+        }
+        expect(upstream.model).toBe("qwen-plus")
+      }
+    },
+  )
+
+  test.each([
+    { path: "/v1/messages", model: "dash/my-claude-openai/gpt-6-luna" },
+    { path: "/dash/v1/messages", model: "my-claude-openai/gpt-6-luna" },
+    { path: "/v1/messages", model: "dash/my-claude-openai/gpt-6-luna[1m]" },
+    { path: "/dash/v1/messages", model: "my-claude-openai/gpt-6-luna[1m]" },
+  ])(
+    "keeps nested provider model namespaces on $path",
+    async ({ path, model }) => {
+      const response = await createApp().request(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model,
+          max_tokens: 128,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      })
+      expect(response.status).toBe(200)
+      const upstream = JSON.parse(
+        fetchMock.mock.calls[0][1]?.body as string,
+      ) as {
+        model: string
+      }
+      expect(upstream.model).toBe("openai/gpt-6-luna")
+    },
+  )
+
   test("routes mapped /v1/messages models to the provider before rate limiting", async () => {
     modelMappings = {
       "claude-opus-4-7": "dash/qwen-plus",
@@ -291,27 +424,47 @@ describe("namespaced model ids fall through to the default lookup", () => {
   // request was misrouted to the provider path and surfaced as a 400/404.
   // These ids must fall through to the default model lookup (Copilot
   // upstream) and be sent as-is, exactly like a plain model id.
-  test("does not route a namespaced /v1/messages id to the provider path", async () => {
-    // Single-segment namespacing: "contoso/glm-5.2".
-    const app = createApp()
-    const response = await app.request("/v1/messages", {
-      body: JSON.stringify({
-        max_tokens: 128,
-        messages: [{ content: "hello", role: "user" }],
-        model: "contoso/glm-5.2",
-      }),
-      headers: {
-        "content-type": "application/json",
-      },
-      method: "POST",
-    })
+  test.each([
+    { model: "contoso/glm-5.2", copilotToken: undefined },
+    { model: "contoso/glm-5.2", copilotToken: "test-copilot-token" },
+    { model: "contoso/family/glm-5.2", copilotToken: undefined },
+    { model: "contoso/family/glm-5.2", copilotToken: "test-copilot-token" },
+  ])("routes %j through the Copilot flow", async ({ model, copilotToken }) => {
+    const originalCopilotToken = state.copilotToken
+    const originalModels = state.models
+    const copilotFlow = spyOn(
+      messagesFlowHandlers,
+      "handleWithChatCompletions",
+    ).mockImplementation((c, payload) =>
+      Promise.resolve(c.json({ model: payload.model })),
+    )
 
-    // Negative: the request was never sent to the configured "dash" provider
-    // and the provider 400 wording is absent (it reached the default flow,
-    // which errors out upstream without a Copilot token, not at the provider).
-    expect(fetchMock).not.toHaveBeenCalled()
-    const body = (await response.json()) as { error?: { message?: string } }
-    expect(body.error?.message).not.toContain("does not support")
+    state.copilotToken = copilotToken
+    state.models = undefined
+
+    try {
+      const app = createApp()
+      const response = await app.request("/v1/messages", {
+        body: JSON.stringify({
+          max_tokens: 128,
+          messages: [{ content: "hello", role: "user" }],
+          model,
+        }),
+        headers: {
+          "content-type": "application/json",
+        },
+        method: "POST",
+      })
+
+      expect(response.status).toBe(200)
+      expect(copilotFlow).toHaveBeenCalledTimes(1)
+      expect(copilotFlow.mock.calls[0][1].model).toBe(model)
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      copilotFlow.mockRestore()
+      state.copilotToken = originalCopilotToken
+      state.models = originalModels
+    }
   })
 
   test("does not route a namespaced /v1/messages/count_tokens id to the provider path and reaches the estimation fallback", async () => {
@@ -335,30 +488,5 @@ describe("namespaced model ids fall through to the default lookup", () => {
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ input_tokens: 42 })
     expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  test("still routes a configured provider alias on /v1/messages/count_tokens to the provider path", async () => {
-    // Regression guard for the happy path: a real provider alias must still
-    // be routed to the provider token counter (not fall through).
-    const app = createApp()
-    const response = await app.request("/v1/messages/count_tokens", {
-      body: JSON.stringify({
-        max_tokens: 128,
-        messages: [{ content: "hello", role: "user" }],
-        model: "dash/qwen-plus",
-      }),
-      headers: {
-        "content-type": "application/json",
-      },
-      method: "POST",
-    })
-
-    expect(response.status).toBe(200)
-    expect(getTokenCount).toHaveBeenCalledTimes(1)
-    const [, selectedModel] = getTokenCount.mock.calls[0] as [
-      TokenCountPayload,
-      TokenCountModel,
-    ]
-    expect(selectedModel.id).toBe("qwen-plus")
   })
 })
