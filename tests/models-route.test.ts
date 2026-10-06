@@ -829,6 +829,100 @@ describe("model routes", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe("https://dash.example/v1/models")
   })
 
+  test.each([
+    {
+      userAgent: "curl/8.0",
+      copilotId: "claude-opus-4-8",
+      providerId: "custom/shared-model",
+      providerDisplayName: "First provider model (custom)",
+    },
+    {
+      userAgent: "claude-cli/2.1.258",
+      copilotId: "claude-opus-4-8[1m]",
+      providerId: "custom/my-claude-shared-model[1m]",
+      providerDisplayName: "First provider model (custom)",
+    },
+    {
+      userAgent: "codex-tui/0.160.0 claude",
+      copilotId: "claude-opus-4-8",
+      providerId: "custom/shared-model",
+      providerDisplayName: "Last provider model (custom)",
+    },
+  ])(
+    "deduplicates normalized IDs and ignores malformed provider records for $userAgent",
+    async ({ userAgent, copilotId, providerId, providerDisplayName }) => {
+      state.models = createCopilotModels(["claude-opus-4.8", "claude-opus-4-8"])
+      state.models.data[0].name = "First Copilot model"
+      state.models.data[1].name = "Last Copilot model"
+      for (const model of state.models.data) {
+        model.supported_endpoints = ["/v1/messages"]
+      }
+      const originalModels = JSON.stringify(state.models)
+      enabledProviders = ["custom"]
+      providerConfigs.custom = createProviderConfig(
+        "custom",
+        "https://custom.example",
+      )
+      fetchMock.mockImplementationOnce(() =>
+        Promise.resolve(
+          Response.json({
+            data: [
+              null,
+              false,
+              [],
+              {},
+              { id: 42 },
+              { id: "" },
+              { id: " " },
+              { id: "shared-model", name: "First provider model" },
+              { id: "shared-model", name: "Last provider model" },
+            ],
+          }),
+        ),
+      )
+
+      const response = await createApp().request("/v1/models", {
+        headers: {
+          "user-agent": userAgent,
+          "x-full-model-catalog": "true",
+        },
+      })
+      expect(response.status).toBe(200)
+      if (userAgent.startsWith("codex")) {
+        const body = (await response.json()) as CodexModelsResponse
+        const models = body.models.filter(
+          (model) =>
+            model.slug === copilotId || model.slug.startsWith("custom/"),
+        )
+        expect(models.map((model) => model.slug)).toEqual([
+          copilotId,
+          providerId,
+        ])
+        expect(models[0].display_name).toBe("First Copilot model")
+        expect(models[1].display_name).toBe(providerDisplayName)
+      } else {
+        const body = (await response.json()) as {
+          data: Array<{ id: string; display_name: string }>
+        }
+        expect(body.data.map((model) => model.id)).toEqual([
+          copilotId,
+          providerId,
+        ])
+        expect(body.data[0].display_name).toBe(
+          "First Copilot model (github-copilot)",
+        )
+        expect(body.data[1].display_name).toBe(providerDisplayName)
+      }
+      expect(JSON.stringify(state.models)).toBe(originalModels)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(
+        new Headers(fetchMock.mock.calls[0]?.[1]?.headers).has(
+          "x-full-model-catalog",
+        ),
+      ).toBe(false)
+    },
+  )
+
   test("keeps Copilot models first and provider models in provider order", async () => {
     state.models = createCopilotModels(["gpt-5-mini", "gpt-5"])
     enabledProviders = ["second", "first"]

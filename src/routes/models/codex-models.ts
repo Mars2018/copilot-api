@@ -3,6 +3,7 @@ import type { Context } from "hono"
 import {
   getModelMappings,
   getRawProviderConfig,
+  listEnabledProviders,
   type ResolvedProviderConfig,
 } from "~/lib/config"
 import {
@@ -14,13 +15,16 @@ import {
   isProviderAgentModelVisible,
 } from "~/lib/provider-management"
 import { createHandlerLogger } from "~/lib/logger"
+import { stripInternalRequestHeaders } from "~/lib/internal-headers"
 import { resolveProviderConfig } from "~/lib/provider-resolver"
+import { getSyntheticCodexModels } from "~/routes/models/codex-model-candidates"
 import type {
   CodexModel,
   CodexModelsResponse,
   CodexReasoningEffort,
   SyntheticCodexModelCandidate,
 } from "~/routes/models/codex-models-types"
+import { isRecord } from "~/routes/models/model-discovery"
 import fallbackCodexCatalogJson from "~/routes/models/models.json"
 import { forwardCodexModels } from "~/services/codex/get-models"
 import { createProviderProxyResponse } from "~/services/providers/provider-proxy"
@@ -135,6 +139,24 @@ export async function handleCodexModelsProxy(
     },
     new Set(getProviderAgentModels(providerConfig)),
     FALLBACK_CODEX_MODELS[0].model_messages,
+  )
+}
+
+export async function handleCodexModels(c: Context): Promise<Response> {
+  const enabledProviders = listEnabledProviders()
+  const codexProviderName = enabledProviders.find(
+    (provider) => provider === "codex",
+  )
+  return await handleMergedCodexModels(
+    c,
+    getSyntheticCodexModels(
+      stripInternalRequestHeaders(c.req.raw.headers),
+      enabledProviders,
+    ),
+    {
+      includeCodexProviderAliases: codexProviderName !== undefined,
+      codexProviderName,
+    },
   )
 }
 
@@ -439,8 +461,4 @@ function isCodexModelsResponse(value: unknown): value is CodexModelsResponse {
   return value.models.every(
     (model: unknown) => isRecord(model) && typeof model.slug === "string",
   )
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
