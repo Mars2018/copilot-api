@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test"
 import { Hono } from "hono"
 
 import type { ResolvedProviderConfig } from "~/lib/config"
@@ -45,6 +53,8 @@ await mock.module("~/lib/token-usage", () => ({
 }))
 
 const { messageRoutes } = await import("~/routes/messages/route")
+const { messagesFlowHandlers } = await import("~/routes/messages/handler")
+const { state } = await import("~/lib/state")
 const { resolveCountTokensModel } = await import(
   "~/routes/messages/count-tokens-handler"
 )
@@ -291,27 +301,47 @@ describe("namespaced model ids fall through to the default lookup", () => {
   // request was misrouted to the provider path and surfaced as a 400/404.
   // These ids must fall through to the default model lookup (Copilot
   // upstream) and be sent as-is, exactly like a plain model id.
-  test("does not route a namespaced /v1/messages id to the provider path", async () => {
-    // Single-segment namespacing: "contoso/glm-5.2".
-    const app = createApp()
-    const response = await app.request("/v1/messages", {
-      body: JSON.stringify({
-        max_tokens: 128,
-        messages: [{ content: "hello", role: "user" }],
-        model: "contoso/glm-5.2",
-      }),
-      headers: {
-        "content-type": "application/json",
-      },
-      method: "POST",
-    })
+  test.each([
+    { model: "contoso/glm-5.2", copilotToken: undefined },
+    { model: "contoso/glm-5.2", copilotToken: "test-copilot-token" },
+    { model: "contoso/family/glm-5.2", copilotToken: undefined },
+    { model: "contoso/family/glm-5.2", copilotToken: "test-copilot-token" },
+  ])("routes %j through the Copilot flow", async ({ model, copilotToken }) => {
+    const originalCopilotToken = state.copilotToken
+    const originalModels = state.models
+    const copilotFlow = spyOn(
+      messagesFlowHandlers,
+      "handleWithChatCompletions",
+    ).mockImplementation((c, payload) =>
+      Promise.resolve(c.json({ model: payload.model })),
+    )
 
-    // Negative: the request was never sent to the configured "dash" provider
-    // and the provider 400 wording is absent (it reached the default flow,
-    // which errors out upstream without a Copilot token, not at the provider).
-    expect(fetchMock).not.toHaveBeenCalled()
-    const body = (await response.json()) as { error?: { message?: string } }
-    expect(body.error?.message).not.toContain("does not support")
+    state.copilotToken = copilotToken
+    state.models = undefined
+
+    try {
+      const app = createApp()
+      const response = await app.request("/v1/messages", {
+        body: JSON.stringify({
+          max_tokens: 128,
+          messages: [{ content: "hello", role: "user" }],
+          model,
+        }),
+        headers: {
+          "content-type": "application/json",
+        },
+        method: "POST",
+      })
+
+      expect(response.status).toBe(200)
+      expect(copilotFlow).toHaveBeenCalledTimes(1)
+      expect(copilotFlow.mock.calls[0][1].model).toBe(model)
+      expect(fetchMock).not.toHaveBeenCalled()
+    } finally {
+      copilotFlow.mockRestore()
+      state.copilotToken = originalCopilotToken
+      state.models = originalModels
+    }
   })
 
   test("does not route a namespaced /v1/messages/count_tokens id to the provider path and reaches the estimation fallback", async () => {
