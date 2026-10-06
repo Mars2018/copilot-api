@@ -153,10 +153,10 @@ export const translateAnthropicMessagesToResponsesPayload = (
     //prompt_cache_retention: "24h",  not work in gpt-5.4
     stream: payload.stream ?? null,
     store: false,
-    parallel_tool_calls: true,
+    parallel_tool_calls: !payload.tool_choice?.disable_parallel_tool_use,
     reasoning: {
       effort: resolveReasoningEffort(payload),
-      summary: "auto",
+      summary: payload.model.includes("grok") ? "concise" : "auto",
       context: isSupportAllTurns(payload) ? "all_turns" : "auto",
     },
     include: ["reasoning.encrypted_content"],
@@ -174,6 +174,14 @@ export const translateAnthropicMessagesToResponsesPayload = (
   // grok meatadata is not supported
   if (responsesPayload.model.includes("grok")) {
     delete responsesPayload.metadata
+    delete responsesPayload.temperature
+    delete responsesPayload.top_p
+    // Match Grok Build: omit the output limit and use upstream defaults.
+    delete responsesPayload.max_output_tokens
+    if (responsesPayload.instructions) {
+      input.unshift(createMessage("system", responsesPayload.instructions))
+    }
+    delete responsesPayload.instructions
   }
 
   return responsesPayload

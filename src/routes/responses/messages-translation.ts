@@ -70,6 +70,11 @@ export const MESSAGES_TOOL_CALL_TIPS = [
   "- If `functions__exec` returns `aborted`, retry at most 3 times. After 3 failures, terminate immediately and inform the user that `functions__exec` is unavailable.",
 ].join("\n")
 
+const MESSAGES_BATCH_TOOL_CALL_TIPS = [
+  "- Parallel tool calls are disabled for this request. Batch independent commands in one functions__exec call; keep dependent operations sequential.",
+  'const results = await Promise.allSettled([tools.exec_command({cmd: "git status --short"})]); for (const result of results) text(JSON.stringify(result.status === "fulfilled" ? result.value : {error: String(result.reason)}))',
+].join("\n")
+
 const JSON_OUTPUT_CONSTRAINT =
   "Do not wrap the JSON in markdown code fences and do not add any text outside the JSON object."
 
@@ -175,6 +180,10 @@ export function translateResponsesToMessages(
     options.toolCallTips ?? false,
   )
 
+  if (options.toolCallTips && payload.parallel_tool_calls === false) {
+    appendToolCallTips(system, MESSAGES_BATCH_TOOL_CALL_TIPS)
+  }
+
   if (normalized.compaction) {
     messages.push({ role: "user", content: MESSAGES_COMPACTION_PROMPT })
   }
@@ -214,6 +223,17 @@ export function translateResponsesToMessages(
       { service_tier: payload.service_tier }
     : {}),
     ...(metadataUserId ? { metadata: { user_id: metadataUserId } } : {}),
+  }
+
+  if (
+    payload.parallel_tool_calls != null
+    && registry.tools.length > 0
+    && messagesPayload.tool_choice?.type !== "none"
+  ) {
+    messagesPayload.tool_choice = {
+      ...(messagesPayload.tool_choice ?? { type: "auto" }),
+      disable_parallel_tool_use: !payload.parallel_tool_calls,
+    }
   }
 
   return {
@@ -564,13 +584,16 @@ function translateInputToAnthropic(
   return { messages, system }
 }
 
-function appendToolCallTips(system: Array<AnthropicTextBlock>): void {
+function appendToolCallTips(
+  system: Array<AnthropicTextBlock>,
+  tips = MESSAGES_TOOL_CALL_TIPS,
+): void {
   const lastSystemBlock = system.at(-1)
   if (!lastSystemBlock) {
-    system.push({ type: "text", text: MESSAGES_TOOL_CALL_TIPS })
+    system.push({ type: "text", text: tips })
     return
   }
-  lastSystemBlock.text = `${lastSystemBlock.text}\n\n${MESSAGES_TOOL_CALL_TIPS}`
+  lastSystemBlock.text = `${lastSystemBlock.text}\n\n${tips}`
 }
 
 function translateInputItems(

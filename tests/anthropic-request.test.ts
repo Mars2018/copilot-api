@@ -224,6 +224,50 @@ describe("Anthropic to OpenAI translation logic", () => {
     ).toEqual({ type: "function", function: { name: "getWeather" } })
   })
 
+  test("maps disable_parallel_tool_use without letting a missing flag imply false", () => {
+    const payload: AnthropicMessagesPayload = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Check the weather" }],
+      max_tokens: 150,
+      tools: [{ name: "getWeather", input_schema: { type: "object" } }],
+    }
+
+    const disabled = translateToOpenAI({
+      ...payload,
+      tool_choice: { type: "auto", disable_parallel_tool_use: true },
+    })
+    const enabled = translateToOpenAI({
+      ...payload,
+      tool_choice: {
+        type: "tool",
+        name: "getWeather",
+        disable_parallel_tool_use: false,
+      },
+    })
+    const omitted = translateToOpenAI({
+      ...payload,
+      tool_choice: { type: "auto" },
+    })
+    const withoutTools = translateToOpenAI({
+      model: payload.model,
+      messages: payload.messages,
+      max_tokens: payload.max_tokens,
+      tool_choice: { type: "none", disable_parallel_tool_use: true },
+    })
+
+    expect(disabled.parallel_tool_calls).toBe(false)
+    expect(disabled.tool_choice).toBe("auto")
+    expect(Object.hasOwn(disabled, "parallel_tool_calls")).toBe(true)
+    expect(enabled.parallel_tool_calls).toBe(true)
+    expect(enabled.tool_choice).toEqual({
+      type: "function",
+      function: { name: "getWeather" },
+    })
+    expect(omitted).not.toHaveProperty("parallel_tool_calls")
+    expect(withoutTools.tool_choice).toBeUndefined()
+    expect(withoutTools.parallel_tool_calls).toBe(false)
+  })
+
   test("should translate comprehensive Anthropic payload to valid OpenAI payload", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
       model: "gpt-4o",

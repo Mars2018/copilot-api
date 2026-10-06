@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test"
 
-import type { AnthropicResponse } from "~/lib/types/anthropic"
+import type {
+  AnthropicMessagesPayload,
+  AnthropicResponse,
+  AnthropicTextBlock,
+} from "~/lib/types/anthropic"
 import type {
   ResponsesPayload,
   ResponseStreamEvent,
@@ -21,6 +25,8 @@ import {
   responsesResultToStreamEvents,
   translateMessagesStream,
 } from "~/routes/responses/messages-stream-translation"
+import { translateAnthropicMessagesToResponsesPayload } from "~/routes/messages/responses-translation"
+import { translateToOpenAI } from "~/routes/messages/non-stream-translation"
 
 const translate = (
   payload: Omit<ResponsesPayload, "model">,
@@ -235,6 +241,61 @@ describe("Responses Lite to Messages translation", () => {
         cache_control: { type: "ephemeral" },
       },
     ])
+  })
+
+  test.each([undefined, "Base instructions"])(
+    "adds Promise.allSettled guidance when parallel tool calls are disabled with instructions %j",
+    (instructions) => {
+      const result = translateWithTips({
+        instructions,
+        input: "Hello",
+        parallel_tool_calls: false,
+      })
+
+      expect(Array.isArray(result.messagesPayload.system)).toBe(true)
+      const system = result.messagesPayload.system as Array<AnthropicTextBlock>
+      expect(system).toHaveLength(1)
+      expect(system[0].text).toContain(MESSAGES_TOOL_CALL_TIPS)
+      expect(system[0].text).toContain(
+        "Parallel tool calls are disabled for this request.",
+      )
+      expect(system[0].text).toContain(
+        'await Promise.allSettled([tools.exec_command({cmd: "git status --short"})])',
+      )
+      expect(system[0].text).toContain(
+        "]); for (const result of results) text(",
+      )
+      expect(system[0].text).toContain('result.status === "fulfilled"')
+      expect(system[0].text).toContain("{error: String(result.reason)}")
+      expect(system[0].text).toContain("text(JSON.stringify(result.status")
+      expect(system[0].text).not.toContain("```")
+      expect(system[0]).toHaveProperty("cache_control", { type: "ephemeral" })
+      if (instructions) expect(system[0].text).toContain(instructions)
+    },
+  )
+
+  test.each([true, undefined, null])(
+    "omits Promise.allSettled guidance for parallel_tool_calls %j",
+    (parallelToolCalls) => {
+      const result = translateWithTips({
+        input: "Hello",
+        parallel_tool_calls: parallelToolCalls,
+      })
+
+      expect(result.messagesPayload.system).toEqual([
+        {
+          type: "text",
+          text: MESSAGES_TOOL_CALL_TIPS,
+          cache_control: { type: "ephemeral" },
+        },
+      ])
+    },
+  )
+
+  test("omits batching guidance when tool call tips are disabled", () => {
+    const result = translate({ input: "Hello", parallel_tool_calls: false })
+
+    expect(result.messagesPayload.system).toBeUndefined()
   })
 
   test("omits tool call tips unless enabled", () => {
@@ -585,6 +646,96 @@ describe("Responses Lite to Messages translation", () => {
 
     expect(result.tool_choice).toBe("none")
   })
+
+  test.each([false, true])(
+    "preserves parallel_tool_calls %j through serialized Messages requests",
+    (parallelToolCalls) => {
+      for (const toolChoice of [
+        undefined,
+        "auto",
+        "required",
+        { type: "function", name: "getWeather" },
+        { type: "custom", name: "apply_patch" },
+      ] as const) {
+        const translation = translate({
+          input: "Check the weather",
+          tools: [
+            { type: "function", name: "getWeather", parameters: null },
+            { type: "custom", name: "apply_patch" },
+          ],
+          tool_choice: toolChoice,
+          parallel_tool_calls: parallelToolCalls,
+        })
+        const messagesPayload = JSON.parse(
+          JSON.stringify(translation.messagesPayload),
+        ) as AnthropicMessagesPayload
+
+        expect(messagesPayload.tool_choice?.disable_parallel_tool_use).toBe(
+          !parallelToolCalls,
+        )
+        if (toolChoice && typeof toolChoice === "object") {
+          expect(messagesPayload.tool_choice?.name).toBe(toolChoice.name)
+        } else {
+          expect(messagesPayload.tool_choice?.type).toBe(
+            toolChoice === "required" ? "any" : "auto",
+          )
+        }
+        expect(
+          translateAnthropicMessagesToResponsesPayload(messagesPayload)
+            .parallel_tool_calls,
+        ).toBe(parallelToolCalls)
+      }
+    },
+  )
+
+  test.each([undefined, null])(
+    "leaves the default parallel tool behavior unchanged for %j",
+    (parallelToolCalls) => {
+      const translation = translate({
+        input: "Check the weather",
+        tools: [{ type: "function", name: "getWeather", parameters: null }],
+        parallel_tool_calls: parallelToolCalls,
+      })
+
+      expect(translation.messagesPayload.tool_choice).toBeUndefined()
+      expect(
+        translateAnthropicMessagesToResponsesPayload(
+          translation.messagesPayload,
+        ).parallel_tool_calls,
+      ).toBe(true)
+    },
+  )
+
+  test("does not add parallel tool settings when tools cannot be called", () => {
+    const withoutTools = translate({
+      input: "Hello",
+      parallel_tool_calls: false,
+    })
+    const withoutToolUse = translate({
+      input: "Hello",
+      tools: [{ type: "function", name: "getWeather", parameters: null }],
+      tool_choice: "none",
+      parallel_tool_calls: false,
+    })
+
+    expect(withoutTools.messagesPayload.tool_choice).toBeUndefined()
+    expect(withoutToolUse.messagesPayload.tool_choice).toEqual({ type: "none" })
+  })
+
+  test.each([false, true])(
+    "preserves parallel_tool_calls %j through Chat Completions translation",
+    (parallelToolCalls) => {
+      const translation = translate({
+        input: "Check the weather",
+        tools: [{ type: "function", name: "getWeather", parameters: null }],
+        parallel_tool_calls: parallelToolCalls,
+      })
+      const openAIPayload = translateToOpenAI(translation.messagesPayload)
+
+      expect(openAIPayload.parallel_tool_calls).toBe(parallelToolCalls)
+      expect(Object.hasOwn(openAIPayload, "parallel_tool_calls")).toBe(true)
+    },
+  )
 
   test("keeps named tool choices for top-level tools", () => {
     const result = translate({
