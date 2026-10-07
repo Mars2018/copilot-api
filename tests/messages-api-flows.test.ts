@@ -11,7 +11,10 @@ import type {
   ChatCompletionResponse,
   ChatCompletionsPayload,
 } from "~/lib/types/chat-completions"
-import type { CreateMessagesReturn } from "~/services/copilot/create-messages"
+import type {
+  createMessages as createCopilotMessages,
+  CreateMessagesReturn,
+} from "~/services/copilot/create-messages"
 import type {
   CreateResponsesReturn,
   ResponsesPayload,
@@ -55,7 +58,11 @@ const createChatCompletions = mock(
   },
 )
 const createMessages = mock(
-  (payload: AnthropicMessagesPayload): Promise<CreateMessagesReturn> => {
+  (
+    payload: AnthropicMessagesPayload,
+    _anthropicBetaHeader: Parameters<typeof createCopilotMessages>[1],
+    _options: Parameters<typeof createCopilotMessages>[2],
+  ): Promise<CreateMessagesReturn> => {
     capturedMessagesPayload = payload
     return Promise.resolve(createMessagesResult(payload.model))
   },
@@ -124,6 +131,36 @@ afterEach(async () => {
   Object.assign(responsesUtilsDependencies, defaultResponsesUtilsDependencies)
   await closeUsageStore()
   Reflect.deleteProperty(process.env, DB_PATH_ENV)
+})
+
+test("Messages flow passes the inbound anthropic-version to the Copilot request", async () => {
+  const app = new Hono()
+  app.post("/", (c) =>
+    handleWithMessagesApi(
+      c,
+      {
+        model: "claude-sonnet-5",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hello" }],
+      },
+      {
+        logger,
+        requestId: "request-version-test",
+        anthropicBetaHeader: "context-management-2025-06-27",
+      },
+    ),
+  )
+
+  const response = await app.request("/", {
+    method: "POST",
+    headers: { "Anthropic-Version": "client-selected-version" },
+  })
+
+  expect(response.status).toBe(200)
+  expect(createMessages.mock.calls[0][1]).toBe("context-management-2025-06-27")
+  expect(createMessages.mock.calls[0][2].anthropicVersionHeader).toBe(
+    "client-selected-version",
+  )
 })
 
 test("messages Chat Completions flow adds Copilot cache control to system and latest non-system message", async () => {
