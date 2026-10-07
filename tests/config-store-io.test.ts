@@ -4,9 +4,12 @@ import os from "node:os"
 import path from "node:path"
 
 import {
+  defaultConfig,
   getAlphaSearchModel,
   getClaudeAutoModel,
   getMessageApiWebSearchModel,
+  getOpencodeModelContextWindow,
+  invalidateConfigCache,
   reloadConfig,
   setConfiguredApiKeys,
   writeConfigToDisk,
@@ -49,6 +52,7 @@ afterEach(() => {
   fs.accessSync = originalAccessSync
   PATHS.APP_DIR = originalAppDir
   PATHS.CONFIG_PATH = originalConfigPath
+  invalidateConfigCache()
   state.githubToken = originalGitHubToken
   state.copilotToken = originalCopilotToken
   while (tempDirs.length > 0) {
@@ -98,10 +102,82 @@ test("reloadConfig creates a default config when it is missing", () => {
   })
   expect(config.alphaSearchModel).toBe("gpt-6-luna")
   expect(config.messageApiWebSearchModel).toBe("gpt-6-luna")
+  expect(config.opencodeModelContextWindow).toBe(300_000)
+  expect(getOpencodeModelContextWindow()).toBe(300_000)
   expect(config.extraPrompts).toBeUndefined()
   expect(config.modelReasoningEfforts).toBeUndefined()
   if (process.platform !== "win32") {
     expect(fs.statSync(configPath).mode & 0o777).toBe(0o600)
+  }
+})
+
+test.each([
+  { configured: undefined, expected: 300_000 },
+  { configured: 150_000, expected: 150_000 },
+  { configured: 600_000, expected: 600_000 },
+  { configured: 150_000.9, expected: 150_000 },
+  { configured: 1, expected: 1 },
+  { configured: 0, expected: 300_000 },
+  { configured: -1, expected: 300_000 },
+  { configured: 0.5, expected: 300_000 },
+  { configured: null, expected: 300_000 },
+  { configured: "600000", expected: 300_000 },
+  { configured: true, expected: 300_000 },
+  { configured: {}, expected: 300_000 },
+  { configured: [], expected: 300_000 },
+])(
+  "normalizes and persists the OpenCode context window setting %j",
+  ({ configured, expected }) => {
+    const configPath = useTempConfigPath()
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        ...defaultConfig,
+        auth: { adminApiKey: "existing-admin-key" },
+        opencodeModelContextWindow: configured,
+      }),
+      "utf8",
+    )
+
+    expect(reloadConfig().opencodeModelContextWindow).toBe(expected)
+    expect(getOpencodeModelContextWindow()).toBe(expected)
+    const storedConfig = fs.readFileSync(configPath, "utf8")
+    expect(
+      (JSON.parse(storedConfig) as AppConfig).opencodeModelContextWindow,
+    ).toBe(expected)
+    expect(reloadConfig().opencodeModelContextWindow).toBe(expected)
+    expect(fs.readFileSync(configPath, "utf8")).toBe(storedConfig)
+  },
+)
+
+test("uses the default OpenCode context ceiling on a lazy read without rewriting legacy config", () => {
+  const configPath = useTempConfigPath()
+  const legacyConfig = JSON.stringify({
+    ...defaultConfig,
+    auth: { adminApiKey: "existing-admin-key" },
+    opencodeModelContextWindow: undefined,
+  })
+  fs.writeFileSync(configPath, legacyConfig, "utf8")
+  invalidateConfigCache()
+
+  expect(getOpencodeModelContextWindow()).toBe(300_000)
+  expect(fs.readFileSync(configPath, "utf8")).toBe(legacyConfig)
+  reloadConfig()
+  expect(
+    (JSON.parse(fs.readFileSync(configPath, "utf8")) as AppConfig)
+      .opencodeModelContextWindow,
+  ).toBe(300_000)
+})
+
+test("reloadConfig refreshes an explicitly configured OpenCode context ceiling", () => {
+  useTempConfigPath()
+  for (const ceiling of [150_000, 600_000]) {
+    writeConfigToDisk({
+      auth: { adminApiKey: "existing-admin-key" },
+      opencodeModelContextWindow: ceiling,
+    })
+    reloadConfig()
+    expect(getOpencodeModelContextWindow()).toBe(ceiling)
   }
 })
 

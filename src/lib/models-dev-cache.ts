@@ -58,6 +58,7 @@ type ModelsDevFetcher = (
 ) => Promise<Response>
 
 interface CatalogSnapshot {
+  catalog: ModelsDevProviderMap
   configs: Record<string, BuiltinProviderModelConfig>
   providerTypes: Record<string, ProviderType>
   records: Array<ModelRecord>
@@ -462,6 +463,7 @@ function parseCatalog(data: unknown): CatalogSnapshot {
     throw new Error("models.dev response has no valid opencode-go models")
   }
   return {
+    catalog: data as ModelsDevProviderMap,
     configs,
     providerTypes,
     records,
@@ -546,6 +548,14 @@ export function getModelsDevModelPricing(
   modelId: string,
 ): TokenUsagePricingConfig | undefined {
   return snapshot?.selectableProviderModelPricing[providerId]?.[modelId]
+}
+
+export function getModelsDevModel(
+  providerId: string,
+  modelId: string,
+): ModelsDevModel | undefined {
+  const model = snapshot?.catalog[providerId]?.models?.[modelId]
+  return isRecord(model) ? model : undefined
 }
 
 export function getModelsDevModelMaxOutputTokens(

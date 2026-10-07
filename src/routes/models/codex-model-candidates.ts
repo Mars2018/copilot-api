@@ -15,8 +15,10 @@ import type { SyntheticCodexModelCandidate } from "~/routes/models/codex-models-
 import {
   deduplicateModels,
   getCopilotModelRecords,
+  getFirstPositiveNumber,
   getModelsById,
   getProviderModelRecords,
+  getRecordField,
   getStringField,
   isRecord,
 } from "~/routes/models/model-discovery"
@@ -363,26 +365,4 @@ function positiveNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ?
       Math.floor(value)
     : fallback
-}
-
-function getRecordField(
-  model: Record<string, unknown> | undefined,
-  field: string,
-): Record<string, unknown> | undefined {
-  const value = model?.[field]
-  return isRecord(value) ? value : undefined
-}
-
-function getFirstPositiveNumber(
-  model: Record<string, unknown> | undefined,
-  fields: Array<string>,
-): number | undefined {
-  if (!model) return undefined
-  for (const field of fields) {
-    const value = model[field]
-    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-      return value
-    }
-  }
-  return undefined
 }

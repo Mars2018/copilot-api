@@ -4,7 +4,7 @@ import { Hono } from "hono"
 import type { ResolvedProviderConfig } from "~/lib/config"
 import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
 import type { ChatCompletionResponse } from "~/lib/types/chat-completions"
-import type { ResponsesResult } from "~/lib/types/responses"
+import type { ResponsesPayload, ResponsesResult } from "~/lib/types/responses"
 import { UpstreamStreamInactivityTimeoutError } from "~/lib/error"
 import type { UsageTokens } from "~/lib/token-usage"
 
@@ -604,6 +604,74 @@ describe("provider Messages Anthropic forwarding", () => {
 })
 
 describe("provider Messages Responses forwarding", () => {
+  test("preserves PDF data when xAI Messages requests use the Responses adapter", async () => {
+    providerConfig = {
+      ...createProviderConfig("xai"),
+      type: "openai-responses",
+      models: {},
+    }
+    upstreamResponseFactory = () =>
+      Response.json({
+        id: "resp-pdf-test",
+        object: "response",
+        created_at: 0,
+        model: "grok-4.7",
+        output: [],
+        output_text: "",
+        status: "completed",
+        error: null,
+        incomplete_details: null,
+        instructions: null,
+        metadata: null,
+        parallel_tool_calls: false,
+        temperature: null,
+        tool_choice: "auto",
+        tools: [],
+        top_p: null,
+      } satisfies ResponsesResult)
+    const payload: AnthropicMessagesPayload = {
+      model: "grok-4.7",
+      max_tokens: 128,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: {
+                type: "base64",
+                media_type: "application/pdf",
+                data: "pdf-data",
+              },
+              title: "report.pdf",
+            },
+          ],
+        },
+      ],
+    }
+    const response = await createApp().request("/xai/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const body = fetchMock.mock.calls[0][1]?.body
+    if (typeof body !== "string") throw new Error("Expected a JSON body")
+    const forwarded = JSON.parse(body) as ResponsesPayload
+    expect(forwarded.input).toContainEqual({
+      type: "message",
+      role: "user",
+      content: [
+        {
+          type: "input_file",
+          file_data: "data:application/pdf;base64,pdf-data",
+          filename: "report.pdf",
+        },
+      ],
+    })
+  })
+
   test("emits an Anthropic error event and records usage when the upstream stream fails", async () => {
     providerConfig = {
       ...createProviderConfig("responses"),

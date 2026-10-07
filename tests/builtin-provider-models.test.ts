@@ -251,6 +251,7 @@ describe("builtin provider model registry", () => {
       contextWindow: 1_000_000,
       inputModalities: ["text", "image"],
       maxOutputTokens: 393_216,
+      defaultReasoningEffort: "high",
       pricing: {
         cachedInput: 0.2,
         input: 2,
@@ -262,6 +263,7 @@ describe("builtin provider model registry", () => {
         output: 8,
         peakWindows: dashscopePeakWindows,
       },
+      reasoningEfforts: ["low", "high", "max"],
     })
   })
 

@@ -8,6 +8,7 @@ import { builtinProviderModelRegistry } from "~/lib/builtin-provider-models"
 import { resolveTokenUsageCost } from "~/lib/token-usage/pricing"
 import {
   getModelsDevModelApi,
+  getModelsDevModel,
   getModelsDevModelMaxOutputTokens,
   getModelsDevModelPricing,
   getModelsDevModelProviderType,
@@ -48,6 +49,32 @@ afterEach(async () => {
   await stopModelsDevRefreshLoop()
   if (tempDir) await fs.rm(tempDir, { recursive: true, force: true })
   tempDir = undefined
+})
+
+test("exposes raw models.dev metadata even for providers excluded from the provider picker", () => {
+  installModelsDevCatalog({
+    ...modelsDevCatalogFixture,
+    "github-copilot": {
+      models: {
+        invalid: null,
+        vision: {
+          id: "vision",
+          cost: { input: 1, output: 2 },
+          modalities: { input: ["text", "image"], output: ["text"] },
+        },
+      },
+    },
+  })
+  expect(getModelsDevModel("opencode-go", "hy3")?.cost).toEqual(
+    modelsDevCatalogFixture["opencode-go"].models.hy3.cost,
+  )
+  expect(getModelsDevModel("github-copilot", "vision")?.cost).toEqual({
+    input: 1,
+    output: 2,
+  })
+  expect(getModelsDevModel("github-copilot", "invalid")).toBeUndefined()
+  expect(getModelsDevModel("missing", "vision")).toBeUndefined()
+  expect(getModelsDevModel("opencode-go", "missing")).toBeUndefined()
 })
 
 test("lists usable Chat, Responses, and Anthropic providers without the built-in choices", async () => {

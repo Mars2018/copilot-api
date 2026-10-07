@@ -18,6 +18,7 @@ export interface AppConfig {
   extraPrompts?: Record<string, string>
   smallModels?: SmallModelsConfig
   contextManagement?: ContextManagementConfig
+  opencodeModelContextWindow?: number
   modelResponsesApiCompactThresholds?: Record<string, number>
   modelReasoningEfforts?: Record<
     string,
@@ -148,6 +149,8 @@ export const defaultContextManagement = {
   responses: false,
 } satisfies Required<ContextManagementConfig>
 
+export const defaultOpencodeModelContextWindow = 300_000
+
 export const defaultConfig: AppConfig = {
   auth: {
     apiKeys: [],
@@ -162,6 +165,7 @@ export const defaultConfig: AppConfig = {
     copilot: "gpt-6-luna",
   },
   contextManagement: defaultContextManagement,
+  opencodeModelContextWindow: defaultOpencodeModelContextWindow,
   modelResponsesApiCompactThresholds,
   useMessagesApi: true,
   useResponsesApiWebSocket: true,
@@ -305,6 +309,10 @@ function mergeDefaultConfig(inputConfig: AppConfig): {
   const contextManagement = normalizeContextManagementConfig(
     config.contextManagement,
   )
+  const opencodeModelContextWindow = positiveIntegerOrDefault(
+    config.opencodeModelContextWindow,
+    defaultOpencodeModelContextWindow,
+  )
   const {
     changed: upstreamTransportMigrated,
     migrated: migratedUpstreamTransport,
@@ -338,6 +346,8 @@ function mergeDefaultConfig(inputConfig: AppConfig): {
   const hasResponsesApiCompactThresholdChanges =
     missingResponsesApiCompactThresholdModels.length > 0
   const hasContextManagementChanges = missingContextManagementKeys.length > 0
+  const hasOpencodeModelContextWindowChanges =
+    config.opencodeModelContextWindow !== opencodeModelContextWindow
   const hasUpstreamTransportChanges = Object.entries(upstreamTransport).some(
     ([key, value]) =>
       migratedUpstreamTransport[key as keyof UpstreamTransportConfig] !== value,
@@ -349,6 +359,7 @@ function mergeDefaultConfig(inputConfig: AppConfig): {
     && !hasReasoningEffortChanges
     && !hasResponsesApiCompactThresholdChanges
     && !hasContextManagementChanges
+    && !hasOpencodeModelContextWindowChanges
     && !hasUpstreamTransportChanges
     && !upstreamTransportMigrated
     && !agentModelsMigrated
@@ -371,6 +382,7 @@ function mergeDefaultConfig(inputConfig: AppConfig): {
         ...defaultContextManagementConfig,
         ...contextManagement,
       },
+      opencodeModelContextWindow,
       extraPrompts: {
         ...defaultExtraPrompts,
         ...extraPrompts,
@@ -550,6 +562,13 @@ export function isMessagesApiEnabled(): boolean {
 export function isResponsesApiWebSocketEnabled(): boolean {
   const config = getConfig()
   return config.useResponsesApiWebSocket ?? true
+}
+
+export function getOpencodeModelContextWindow(): number {
+  return positiveIntegerOrDefault(
+    getConfig().opencodeModelContextWindow,
+    defaultOpencodeModelContextWindow,
+  )
 }
 
 // Applies to every upstream HTTP transport (Copilot Chat Completions and

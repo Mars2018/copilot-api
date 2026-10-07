@@ -10,6 +10,10 @@ import { PATHS } from "~/lib/paths"
 import { defaultConfig, invalidateConfigCache } from "~/lib/config-store"
 import type { ModelsResponse } from "~/lib/types/models"
 import type { CodexModelsResponse } from "~/routes/models/codex-models-types"
+import {
+  isOpencodeUserAgent,
+  type OpencodeModel,
+} from "~/routes/models/opencode-models"
 import bundledCodexCatalogJson from "~/routes/models/models.json"
 
 import { modelsDevCatalogFixture } from "./fixtures/models-dev-catalog"
@@ -28,14 +32,19 @@ let modelMappings: Record<string, string> = {}
 const originalConfigPath = PATHS.CONFIG_PATH
 let catalogConfigDir: string | undefined
 
-function setCatalogLimit(maxModels: number) {
-  catalogConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "catalog-route-"))
+function setRouteConfig(config: Record<string, unknown>) {
+  if (!catalogConfigDir) {
+    const tempRoot = path.join(os.tmpdir(), "opencode")
+    fs.mkdirSync(tempRoot, { recursive: true })
+    catalogConfigDir = fs.mkdtempSync(path.join(tempRoot, "catalog-route-"))
+  }
   PATHS.CONFIG_PATH = path.join(catalogConfigDir, "config.json")
-  fs.writeFileSync(
-    PATHS.CONFIG_PATH,
-    JSON.stringify({ codexModelCatalog: { maxModels } }),
-  )
+  fs.writeFileSync(PATHS.CONFIG_PATH, JSON.stringify(config))
   invalidateConfigCache()
+}
+
+function setCatalogLimit(maxModels: number) {
+  setRouteConfig({ codexModelCatalog: { maxModels } })
 }
 
 function enableCodexCatalog() {
@@ -269,6 +278,7 @@ function createApp(fullCatalog = true) {
 }
 
 beforeEach(() => {
+  setRouteConfig({})
   installModelsDevCatalog(modelsDevCatalogFixture)
   enabledProviders = []
   providerConfigs = {}
@@ -295,6 +305,1022 @@ afterEach(() => {
 })
 
 describe("model routes", () => {
+  test.each([
+    "opencode/2.0.24",
+    "custom-client (OpenCode2; Windows)",
+    "codex-cli/1.0.0 (opencode integration)",
+  ])(
+    "returns v2 models when the user agent contains OpenCode: %s",
+    async (userAgent) => {
+      state.models = createCopilotModels(["gpt-test", "claude-sonnet-4.6"])
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": userAgent },
+      })
+      const body = (await response.json()) as {
+        data: Array<OpencodeModel>
+        has_more: boolean
+      }
+      expect(response.status).toBe(200)
+      expect(response.headers.get("cache-control")).toBe("private, no-store")
+      expect(response.headers.get("vary")).toBe("User-Agent")
+      expect(body.has_more).toBe(false)
+      expect(body.data.map((model) => model.modelID)).toEqual([
+        "gpt-test",
+        "claude-sonnet-4-6",
+      ])
+      expect(body.data[0]).toMatchObject({
+        providerID: "local",
+        package: "@opencode/ai/providers/openai/responses",
+        capabilities: { tools: true, input: ["text"], output: ["text"] },
+        limit: { context: 200_000, output: 32_000 },
+        cost: [],
+        status: "active",
+      })
+      expect(body.data[1].id).not.toContain("[1m]")
+      expect(fetchMock).not.toHaveBeenCalled()
+    },
+  )
+
+  test("does not treat a missing or unrelated user agent as OpenCode", () => {
+    expect(isOpencodeUserAgent(undefined)).toBe(false)
+    expect(isOpencodeUserAgent("claude-cli/2.1.258")).toBe(false)
+  })
+
+  test.each<{
+    name: string
+    configured?: unknown
+    context: number
+    input?: number
+    expectedContext: number
+    expectedInput?: number
+  }>([
+    {
+      name: "both limits above the default",
+      context: 1_000_000,
+      input: 900_000,
+      expectedContext: 300_000,
+      expectedInput: 300_000,
+    },
+    {
+      name: "only context above the default",
+      context: 400_000,
+      input: 250_000,
+      expectedContext: 300_000,
+      expectedInput: 250_000,
+    },
+    {
+      name: "both limits below the default",
+      context: 200_000,
+      input: 180_000,
+      expectedContext: 200_000,
+      expectedInput: 180_000,
+    },
+    {
+      name: "both limits equal to the default",
+      context: 300_000,
+      input: 300_000,
+      expectedContext: 300_000,
+      expectedInput: 300_000,
+    },
+    {
+      name: "missing input stays omitted",
+      context: 1_000_000,
+      expectedContext: 300_000,
+    },
+    {
+      name: "input still cannot exceed the original context",
+      context: 200_000,
+      input: 400_000,
+      expectedContext: 200_000,
+      expectedInput: 200_000,
+    },
+    {
+      name: "a lower configured ceiling",
+      configured: 150_000,
+      context: 400_000,
+      input: 250_000,
+      expectedContext: 150_000,
+      expectedInput: 150_000,
+    },
+    {
+      name: "a higher configured ceiling",
+      configured: 750_000,
+      context: 1_000_000,
+      input: 900_000,
+      expectedContext: 750_000,
+      expectedInput: 750_000,
+    },
+    {
+      name: "a higher ceiling never expands limits",
+      configured: 1_000_000,
+      context: 400_000,
+      input: 250_000,
+      expectedContext: 400_000,
+      expectedInput: 250_000,
+    },
+    {
+      name: "output is unaffected by a low ceiling",
+      configured: 10_000,
+      context: 400_000,
+      input: 250_000,
+      expectedContext: 10_000,
+      expectedInput: 10_000,
+    },
+    {
+      name: "fractional configuration is rounded down",
+      configured: 150_000.9,
+      context: 400_000,
+      input: 250_000,
+      expectedContext: 150_000,
+      expectedInput: 150_000,
+    },
+    ...[0, -1, 0.5, null, "600000"].map((configured) => ({
+      name: `invalid ceiling ${JSON.stringify(configured)} uses the default`,
+      configured,
+      context: 1_000_000,
+      input: 900_000,
+      expectedContext: 300_000,
+      expectedInput: 300_000,
+    })),
+  ])(
+    "applies the OpenCode context window ceiling: $name",
+    async ({ configured, context, input, expectedContext, expectedInput }) => {
+      setRouteConfig({ opencodeModelContextWindow: configured })
+      state.models = createCopilotModels(["gpt-test"])
+      state.models.data[0].capabilities.limits = {
+        max_context_window_tokens: context,
+        ...(input !== undefined && { max_prompt_tokens: input }),
+        max_output_tokens: 32_000,
+      }
+      const original = structuredClone(state.models)
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode/2.0.24" },
+      })
+      expect(response.status).toBe(200)
+      const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+      expect(data[0].limit).toEqual({
+        context: expectedContext,
+        ...(expectedInput !== undefined && { input: expectedInput }),
+        output: 32_000,
+      })
+      expect(state.models).toEqual(original)
+      expect(fetchMock).not.toHaveBeenCalled()
+    },
+  )
+
+  test("caps models.dev limits and per-model overrides without mutating their metadata", async () => {
+    setRouteConfig({ opencodeModelContextWindow: 150_000 })
+    const catalogModel = {
+      id: "catalog-model",
+      limit: { context: 1_000_000, input: 900_000, output: 64_000 },
+    }
+    const originalCatalog = structuredClone(catalogModel)
+    installModelsDevCatalog({
+      ...modelsDevCatalogFixture,
+      catalog: { models: { "catalog-model": catalogModel } },
+    })
+    enabledProviders = ["custom"]
+    providerConfigs.custom = {
+      ...createProviderConfig("custom", "https://custom.example"),
+      modelsDevProviderId: "catalog",
+      models: {
+        "catalog-model": { contextWindow: 800_000, maxOutputTokens: 128_000 },
+      },
+    }
+    const originalConfig = structuredClone(providerConfigs.custom)
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(Response.json({ data: [{ id: "catalog-model" }] })),
+    )
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "opencode" },
+    })
+    expect(response.status).toBe(200)
+    const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+    expect(data[0].limit).toEqual({
+      context: 150_000,
+      input: 150_000,
+      output: 128_000,
+    })
+    expect(catalogModel).toEqual(originalCatalog)
+    expect(providerConfigs.custom).toEqual(originalConfig)
+  })
+
+  test("uses the new ceiling after the gateway config cache is refreshed", async () => {
+    state.models = createCopilotModels(["gpt-test"])
+    state.models.data[0].capabilities.limits = {
+      max_context_window_tokens: 1_000_000,
+      max_prompt_tokens: 900_000,
+      max_output_tokens: 128_000,
+    }
+    for (const ceiling of [150_000, 600_000]) {
+      setRouteConfig({ opencodeModelContextWindow: ceiling })
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode" },
+      })
+      expect(response.status).toBe(200)
+      const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+      expect(data[0].limit).toEqual({
+        context: ceiling,
+        input: ceiling,
+        output: 128_000,
+      })
+    }
+  })
+
+  test.each(["curl/8.0", "claude-cli/2.1.258"])(
+    "leaves non-OpenCode model limits unchanged for %s",
+    async (userAgent) => {
+      setRouteConfig({ opencodeModelContextWindow: 64_000 })
+      state.models = createCopilotModels(["gpt-test"])
+      const limits = {
+        max_context_window_tokens: 1_000_000,
+        max_prompt_tokens: 900_000,
+        max_output_tokens: 128_000,
+      }
+      state.models.data[0].capabilities.limits = limits
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": userAgent },
+      })
+      expect(response.status).toBe(200)
+      const { data } = (await response.json()) as ModelsResponse
+      expect(data[0].capabilities.limits).toEqual(limits)
+    },
+  )
+
+  test("reuses models.dev capabilities, limits and all price tiers over Responses", async () => {
+    const catalogModel = {
+      id: "catalog-model",
+      name: "Catalog Model",
+      family: "gpt",
+      release_date: "2026-09-01",
+      status: "beta",
+      tool_call: false,
+      modalities: { input: ["text", "image"], output: ["text"] },
+      limit: { context: 150_000, input: 120_000, output: 40_000 },
+      reasoning_options: [{ type: "effort", values: ["none", "high", "high"] }],
+      cost: {
+        input: 1,
+        output: 3,
+        cache_read: 0.1,
+        cache_write: 1.25,
+        tiers: [
+          {
+            input: 2,
+            output: 6,
+            cache_read: 0.2,
+            cache_write: 2.5,
+            tier: { type: "context", size: 100_000 },
+          },
+        ],
+      },
+      provider: {
+        npm: "@ai-sdk/openai",
+        api: "https://catalog.example/responses",
+        headers: { authorization: "upstream-only" },
+      },
+    }
+    const original = structuredClone(catalogModel)
+    installModelsDevCatalog({
+      ...modelsDevCatalogFixture,
+      catalog: { models: { "catalog-model": catalogModel } },
+    })
+    enabledProviders = ["custom"]
+    providerConfigs.custom = {
+      ...createProviderConfig("custom", "https://custom.example"),
+      modelsDevProviderId: "catalog",
+      models: { "catalog-model": { supportPdf: true } },
+    }
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(Response.json({ data: [{ id: "catalog-model" }] })),
+    )
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "opencode/2.0.24" },
+    })
+    const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+    expect(data[0]).toMatchObject({
+      id: "custom/catalog-model",
+      modelID: "custom/catalog-model",
+      package: "@opencode/ai/providers/openai/responses",
+      family: "gpt",
+      capabilities: {
+        tools: false,
+        input: ["text", "image", "pdf"],
+        output: ["text"],
+      },
+      limit: catalogModel.limit,
+      time: { released: Date.parse(catalogModel.release_date) },
+      status: "beta",
+      variants: [
+        {
+          id: "none",
+          body: { reasoning: { effort: "none" } },
+        },
+        { id: "high", body: { reasoning: { effort: "high" } } },
+      ],
+      cost: [
+        { input: 1, output: 3, cache: { read: 0.1, write: 1.25 } },
+        {
+          input: 2,
+          output: 6,
+          cache: { read: 0.2, write: 2.5 },
+          tier: { type: "context", size: 100_000 },
+        },
+      ],
+    })
+    expect(data[0]).not.toHaveProperty("headers")
+    expect(data[0]).not.toHaveProperty("settings")
+    expect(catalogModel).toEqual(original)
+  })
+
+  test("uses Copilot's live limits and looks up catalog prices using its original Claude ID", async () => {
+    installModelsDevCatalog({
+      ...modelsDevCatalogFixture,
+      "github-copilot": {
+        models: {
+          "claude-sonnet-4.6": {
+            id: "claude-sonnet-4.6",
+            limit: { context: 1_000_000, output: 64_000 },
+            cost: {
+              input: 3,
+              output: 15,
+              context_over_200k: { input: 6, output: 22.5 },
+            },
+          },
+        },
+      },
+    })
+    state.models = createCopilotModels(["claude-sonnet-4.6"])
+    state.models.data[0].preview = true
+    state.models.data[0].capabilities.limits = {
+      max_context_window_tokens: 200_000,
+      max_prompt_tokens: 180_000,
+      max_output_tokens: 16_000,
+    }
+    state.models.data[0].capabilities.supports = {
+      tool_calls: false,
+      vision: true,
+      reasoning_effort: ["low", "high"],
+    }
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "opencode" },
+    })
+    const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+    expect(data[0]).toMatchObject({
+      id: "claude-sonnet-4-6",
+      limit: { context: 200_000, input: 180_000, output: 16_000 },
+      capabilities: { tools: false, input: ["text", "image"] },
+      status: "beta",
+      cost: [
+        { input: 3, output: 15, cache: { read: 0, write: 0 } },
+        {
+          input: 6,
+          output: 22.5,
+          cache: { read: 0, write: 0 },
+          tier: { type: "context", size: 200_001 },
+        },
+      ],
+    })
+  })
+
+  test("applies agent model selections and discovers configured models absent from upstream", async () => {
+    enabledProviders = ["custom"]
+    providerConfigs["github-copilot"] = {
+      ...createProviderConfig("github-copilot", "https://copilot.example"),
+      agentsModels: ["claude-sonnet-4-6"],
+    }
+    providerConfigs.custom = {
+      ...createProviderConfig("custom", "https://custom.example"),
+      pricingCurrency: "USD",
+      agentsModels: ["configured"],
+      models: {
+        configured: {
+          contextWindow: 80_000,
+          maxOutputTokens: 12_000,
+          inputModalities: ["text", "image"],
+          reasoningEfforts: ["high"],
+          pricing: { input: 0.5, output: 1, cachedInput: 0.05 },
+        },
+      },
+    }
+    state.models = createCopilotModels(["gpt-hidden", "claude-sonnet-4.6"])
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(Response.json({ data: [{ id: "hidden" }] })),
+    )
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "opencode" },
+    })
+    const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+    expect(data.map((model) => model.id)).toEqual([
+      "claude-sonnet-4-6",
+      "custom/configured",
+    ])
+    expect(data[1]).toMatchObject({
+      limit: { context: 80_000, output: 12_000 },
+      capabilities: { input: ["text", "image"] },
+      variants: [{ id: "high" }],
+      cost: [{ input: 0.5, output: 1, cache: { read: 0.05, write: 0 } }],
+    })
+  })
+
+  test.each(["USD", "CNY"])(
+    "converts %s pricing overrides to USD",
+    async (pricingCurrency) => {
+      enabledProviders = ["opencode-go"]
+      providerConfigs["opencode-go"] = {
+        ...createProviderConfig("opencode-go", "https://unused.example"),
+        agentsModels: ["gpt-6-luna"],
+        pricingCurrency,
+        models: {
+          "gpt-6-luna": {
+            contextWindow: 10_000,
+            maxOutputTokens: 20_000,
+            inputModalities: ["text"],
+            pricing: {
+              input: 1,
+              cachedInput: 0.1,
+              tiers: [
+                { input: 2, output: 8 },
+                { input: 1, output: 4, maxInputTokens: 5_000 },
+              ],
+            },
+          },
+        },
+      }
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode" },
+      })
+      const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+      expect(data[0].limit).toEqual({ context: 10_000, output: 10_000 })
+      expect(data[0].capabilities.input).toEqual(["text", "pdf"])
+      // CNY prices are divided by the fixed 6.7 rate and rounded to 6 decimals.
+      expect(data[0].cost).toEqual(
+        pricingCurrency === "USD" ?
+          [
+            { input: 1, output: 4, cache: { read: 0.1, write: 0 } },
+            {
+              input: 2,
+              output: 8,
+              cache: { read: 0.1, write: 0 },
+              tier: { type: "context", size: 5_001 },
+            },
+          ]
+        : [
+            {
+              input: 0.149254,
+              output: 0.597015,
+              cache: { read: 0.014925, write: 0 },
+            },
+            {
+              input: 0.298507,
+              output: 1.19403,
+              cache: { read: 0.014925, write: 0 },
+              tier: { type: "context", size: 5_001 },
+            },
+          ],
+      )
+    },
+  )
+
+  test("converts built-in CNY prices to USD for OpenCode", async () => {
+    enabledProviders = ["dashscope"]
+    providerConfigs.dashscope = createProviderConfig(
+      "dashscope",
+      "https://dashscope.example",
+    )
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(Response.json({ data: [{ id: "deepseek-v4.1-flash" }] })),
+    )
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "opencode" },
+    })
+    const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+    expect(data[0].cost).toEqual([
+      {
+        input: 0.298507,
+        output: 1.19403,
+        cache: { read: 0.029851, write: 0 },
+      },
+    ])
+  })
+
+  test("tolerates malformed models.dev metadata and unsupported efforts", async () => {
+    enabledProviders = ["custom"]
+    providerConfigs.custom = createProviderConfig(
+      "custom",
+      "https://custom.example",
+    )
+    installModelsDevCatalog({
+      ...modelsDevCatalogFixture,
+      custom: {
+        models: {
+          "broken-pricing": {
+            id: "broken-pricing",
+            cost: { input: 1, output: 2, tiers: {} },
+          },
+          "odd-efforts": {
+            id: "odd-efforts",
+            reasoning_options: [
+              null,
+              { type: "effort", values: ["high", "minimal", "default", "low"] },
+            ],
+          },
+        },
+      },
+    })
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(
+        Response.json({
+          data: [{ id: "broken-pricing" }, { id: "odd-efforts" }],
+        }),
+      ),
+    )
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "opencode" },
+    })
+    expect(response.status).toBe(200)
+    const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+    expect(data[0].variants).toEqual([])
+    expect(data[0].cost).toEqual([
+      { input: 1, output: 2, cache: { read: 0, write: 0 } },
+    ])
+    expect(data[1].variants).toEqual([
+      { id: "high", body: { reasoning: { effort: "high" } } },
+      { id: "minimal", body: { reasoning: { effort: "minimal" } } },
+      { id: "low", body: { reasoning: { effort: "low" } } },
+    ])
+    expect(data[1].cost).toEqual([])
+  })
+
+  test("keeps unknown pricing empty and preserves published zero prices", async () => {
+    enabledProviders = ["custom"]
+    providerConfigs.custom = createProviderConfig(
+      "custom",
+      "https://custom.example",
+    )
+    installModelsDevCatalog({
+      ...modelsDevCatalogFixture,
+      custom: {
+        models: {
+          free: { id: "free", cost: { input: 0, output: 0 } },
+          unknown: { id: "unknown" },
+        },
+      },
+    })
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(
+        Response.json({
+          data: [{ id: "free" }, { id: "unknown" }, { id: "unknown" }],
+        }),
+      ),
+    )
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "opencode" },
+    })
+    const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+    expect(data).toHaveLength(2)
+    expect(data[0].cost).toEqual([
+      { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    ])
+    expect(data[1].cost).toEqual([])
+    expect(data[1].limit).toEqual({ context: 200_000, output: 32_000 })
+  })
+
+  test("discovers OpenRouter modalities and limits from the upstream catalog", async () => {
+    enabledProviders = ["openrouter"]
+    providerConfigs.openrouter = createProviderConfig(
+      "openrouter",
+      "https://openrouter.example",
+    )
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "opencode" },
+    })
+    const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+    expect(data[0]).toMatchObject({
+      id: "openrouter/openai/gpt-5.1-codex",
+      modelID: "openrouter/openai/gpt-5.1-codex",
+      capabilities: { input: ["file", "image", "text"] },
+      limit: { context: 300_000, output: 32_000 },
+    })
+  })
+
+  test("uses built-in Codex prices and skips unavailable providers for OpenCode", async () => {
+    enableCodexCatalog()
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "opencode" },
+    })
+    const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+    expect(data.find((model) => model.id === "codex/gpt-6-luna")).toMatchObject(
+      {
+        capabilities: { input: ["text", "image", "pdf"] },
+        limit: { context: 300_000, input: 300_000, output: 128_000 },
+        cost: [
+          { input: 0.1, output: 0.5, cache: { read: 0.01, write: 0.125 } },
+          {
+            input: 0.2,
+            output: 0.75,
+            cache: { read: 0.02, write: 0.25 },
+            tier: { type: "context", size: 272_001 },
+          },
+        ],
+      },
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+    codexSetupError = new Error("codex unavailable")
+    const failed = await createApp().request("/v1/models", {
+      headers: { "user-agent": "opencode" },
+    })
+    expect(
+      ((await failed.json()) as { data: Array<OpencodeModel> }).data,
+    ).toEqual([])
+  })
+
+  test.each<{
+    vision: ModelsResponse["data"][number]["capabilities"]["limits"]["vision"]
+    expectedPdf: boolean
+  }>([
+    {
+      vision: {
+        supported_media_types: [
+          "image/jpeg",
+          "image/png",
+          "image/webp",
+          "image/gif",
+          "application/pdf",
+        ],
+      },
+      expectedPdf: true,
+    },
+    {
+      vision: { supported_media_types: ["image/jpeg", "image/png"] },
+      expectedPdf: false,
+    },
+    {
+      vision: { supported_media_types: ["application/pdf", "application/pdf"] },
+      expectedPdf: true,
+    },
+    { vision: { supported_media_types: [] }, expectedPdf: false },
+    { vision: {}, expectedPdf: false },
+    { vision: undefined, expectedPdf: false },
+  ])(
+    "derives Copilot PDF input from live supported media types: %j",
+    async ({ vision, expectedPdf }) => {
+      const catalogModel = {
+        id: "gpt-test",
+        modalities: { input: ["text", "image"], output: ["text"] },
+      }
+      const originalCatalogModel = structuredClone(catalogModel)
+      installModelsDevCatalog({
+        ...modelsDevCatalogFixture,
+        "github-copilot": { models: { "gpt-test": catalogModel } },
+      })
+      state.models = createCopilotModels(["gpt-test"])
+      state.models.data[0].capabilities.supports.vision = true
+      state.models.data[0].capabilities.limits.vision = vision
+      const originalModels = structuredClone(state.models)
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode" },
+      })
+
+      expect(response.status).toBe(200)
+      const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+      expect(data).toHaveLength(1)
+      expect(data[0].capabilities.input).toEqual(
+        expectedPdf ? ["text", "image", "pdf"] : ["text", "image"],
+      )
+      expect(state.models).toEqual(originalModels)
+      expect(catalogModel).toEqual(originalCatalogModel)
+      expect(fetchMock).not.toHaveBeenCalled()
+    },
+  )
+
+  test.each([
+    {
+      mediaTypes: ["application/pdf"],
+      supportPdf: undefined,
+      expectedPdf: true,
+    },
+    { mediaTypes: ["application/pdf"], supportPdf: false, expectedPdf: false },
+    { mediaTypes: ["application/pdf"], supportPdf: true, expectedPdf: true },
+    { mediaTypes: ["image/png"], supportPdf: undefined, expectedPdf: false },
+    { mediaTypes: ["image/png"], supportPdf: true, expectedPdf: true },
+    { mediaTypes: ["image/png"], supportPdf: false, expectedPdf: false },
+  ])(
+    "lets Copilot model supportPdf override live metadata independently of image support: %j",
+    async ({ mediaTypes, supportPdf, expectedPdf }) => {
+      state.models = createCopilotModels(["claude-sonnet-4.6"])
+      state.models.data[0].capabilities.supports.vision = false
+      state.models.data[0].capabilities.limits.vision = {
+        supported_media_types: mediaTypes,
+      }
+      providerConfigs["github-copilot"] = {
+        ...createProviderConfig("github-copilot", "https://copilot.example"),
+        models: { "claude-sonnet-4.6": { supportPdf } },
+      }
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode" },
+      })
+
+      expect(response.status).toBe(200)
+      const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+      expect(data).toHaveLength(1)
+      expect(data[0].modelID).toBe("claude-sonnet-4-6")
+      expect(data[0].capabilities.input).toEqual(
+        expectedPdf ? ["text", "pdf"] : ["text"],
+      )
+    },
+  )
+
+  test("updates Copilot PDF discovery when its live model metadata changes", async () => {
+    state.models = createCopilotModels(["gpt-test"])
+    state.models.data[0].capabilities.supports.vision = true
+    for (const mediaTypes of [["application/pdf"], ["image/png"]]) {
+      state.models.data[0].capabilities.limits.vision = {
+        supported_media_types: mediaTypes,
+      }
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode" },
+      })
+      expect(response.status).toBe(200)
+      const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+      expect(data[0].capabilities.input.includes("pdf")).toBe(
+        mediaTypes.includes("application/pdf"),
+      )
+    }
+  })
+
+  test("does not infer other providers' PDF support from Copilot-shaped media metadata", async () => {
+    enabledProviders = ["custom"]
+    providerConfigs.custom = createProviderConfig(
+      "custom",
+      "https://custom.example",
+    )
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(
+        Response.json({
+          data: [
+            {
+              id: "custom-model",
+              capabilities: {
+                supports: { vision: true },
+                limits: {
+                  vision: { supported_media_types: ["application/pdf"] },
+                },
+              },
+            },
+          ],
+        }),
+      ),
+    )
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "opencode" },
+    })
+    expect(response.status).toBe(200)
+    const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+    expect(data[0].capabilities.input).toEqual(["text", "image"])
+  })
+
+  test.each(["codex", "xai"])(
+    "advertises PDF input by default for the %s provider",
+    async (provider) => {
+      if (provider === "codex") {
+        enableCodexCatalog()
+      } else {
+        enabledProviders = ["xai"]
+        providerConfigs.xai = {
+          ...createProviderConfig("xai", "https://xai.example"),
+          type: "openai-responses",
+        }
+        fetchMock.mockImplementationOnce(() =>
+          Promise.resolve(
+            Response.json({
+              data: [{ id: "grok-4.7", input_modalities: ["text", "image"] }],
+            }),
+          ),
+        )
+      }
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode" },
+      })
+      expect(response.status).toBe(200)
+      const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+      expect(data.length).toBeGreaterThan(0)
+      expect(
+        data.every((model) => model.capabilities.input.includes("pdf")),
+      ).toBe(true)
+    },
+  )
+
+  test.each(["codex", "xai"])(
+    "lets supportPdf=false disable the %s provider PDF default",
+    async (provider) => {
+      const modelId = provider === "codex" ? "gpt-6-luna" : "grok-4.7"
+      if (provider === "codex") {
+        enableCodexCatalog()
+        providerConfigs.codex!.agentsModels = [modelId]
+      } else {
+        enabledProviders = ["xai"]
+        providerConfigs.xai = {
+          ...createProviderConfig("xai", "https://xai.example"),
+          type: "openai-responses",
+        }
+        fetchMock.mockImplementationOnce(() =>
+          Promise.resolve(
+            Response.json({
+              data: [
+                { id: modelId, input_modalities: ["text", "image", "pdf"] },
+              ],
+            }),
+          ),
+        )
+      }
+      providerConfigs[provider]!.models = { [modelId]: { supportPdf: false } }
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode" },
+      })
+      expect(response.status).toBe(200)
+      const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+      expect(data).toHaveLength(1)
+      expect(data[0].capabilities.input).toEqual(["text", "image"])
+    },
+  )
+
+  test.each(
+    [
+      { provider: "custom", modelsDevProviderId: "catalog" },
+      { provider: "catalog", modelsDevProviderId: undefined },
+    ].flatMap((providerConfig) =>
+      [undefined, false, true].map((supportPdf) => ({
+        ...providerConfig,
+        supportPdf,
+      })),
+    ),
+  )(
+    "uses models.dev PDF input for $provider with supportPdf=$supportPdf",
+    async ({ provider, modelsDevProviderId, supportPdf }) => {
+      const catalogModel = {
+        id: "gpt-custom",
+        modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+      }
+      const originalCatalogModel = structuredClone(catalogModel)
+      installModelsDevCatalog({
+        ...modelsDevCatalogFixture,
+        catalog: { models: { "gpt-custom": catalogModel } },
+      })
+      enabledProviders = [provider]
+      providerConfigs[provider] = {
+        ...createProviderConfig(provider, "https://custom.example"),
+        modelsDevProviderId,
+        models: { "gpt-custom": { supportPdf } },
+      }
+      fetchMock.mockImplementationOnce(() =>
+        Promise.resolve(
+          Response.json({
+            data: [{ id: "gpt-custom", input_modalities: ["text", "image"] }],
+          }),
+        ),
+      )
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode" },
+      })
+      expect(response.status).toBe(200)
+      const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+      expect(data[0].modelID).toBe(`${provider}/gpt-custom`)
+      expect(data[0].capabilities.input).toEqual(
+        supportPdf !== false ? ["text", "image", "pdf"] : ["text", "image"],
+      )
+      expect(catalogModel).toEqual(originalCatalogModel)
+    },
+  )
+
+  test.each([undefined, false, true])(
+    "uses Copilot's original Claude ID for catalog PDF metadata with supportPdf=%j",
+    async (supportPdf) => {
+      installModelsDevCatalog({
+        ...modelsDevCatalogFixture,
+        "github-copilot": {
+          models: {
+            "claude-sonnet-4.6": {
+              id: "claude-sonnet-4.6",
+              modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+            },
+          },
+        },
+      })
+      state.models = createCopilotModels(["claude-sonnet-4.6"])
+      state.models.data[0].capabilities.supports.vision = true
+      state.models.data[0].capabilities.limits.vision = {
+        supported_media_types: ["image/png"],
+      }
+      providerConfigs["github-copilot"] = {
+        ...createProviderConfig("github-copilot", "https://copilot.example"),
+        models: { "claude-sonnet-4.6": { supportPdf } },
+      }
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode" },
+      })
+
+      expect(response.status).toBe(200)
+      const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+      expect(data[0].modelID).toBe("claude-sonnet-4-6")
+      expect(data[0].capabilities.input).toEqual(
+        supportPdf !== false ? ["text", "image", "pdf"] : ["text", "image"],
+      )
+      expect(fetchMock).not.toHaveBeenCalled()
+    },
+  )
+
+  test.each([
+    { modalities: undefined, expectedPdf: false },
+    { modalities: { input: ["text"], output: ["pdf"] }, expectedPdf: false },
+    { modalities: { input: [], output: ["text"] }, expectedPdf: false },
+    { modalities: { input: ["text"], output: ["text"] }, expectedPdf: false },
+    {
+      modalities: { input: ["text", "pdf"], output: ["text"] },
+      expectedPdf: true,
+    },
+    {
+      modalities: { input: ["text", "pdf", "pdf"], output: ["text"] },
+      expectedPdf: true,
+    },
+  ])(
+    "only infers PDF from models.dev input modalities: %j",
+    async ({ modalities, expectedPdf }) => {
+      const catalogModel = { id: "catalog-model", modalities }
+      installModelsDevCatalog({
+        ...modelsDevCatalogFixture,
+        custom: { models: { "catalog-model": catalogModel } },
+      })
+      enabledProviders = ["custom"]
+      providerConfigs.custom = {
+        ...createProviderConfig("custom", "https://custom.example"),
+        models: { "catalog-model": { inputModalities: ["text"] } },
+      }
+      fetchMock.mockImplementationOnce(() =>
+        Promise.resolve(Response.json({ data: [{ id: "catalog-model" }] })),
+      )
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode" },
+      })
+      expect(response.status).toBe(200)
+      const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+      expect(data[0].capabilities.input).toEqual(
+        expectedPdf ? ["text", "pdf"] : ["text"],
+      )
+    },
+  )
+
+  test.each([
+    { modelId: "qwen3.7-plus", efforts: ["low", "medium", "xhigh"] },
+    { modelId: "qwen3.8-max", efforts: ["low", "medium", "xhigh"] },
+    { modelId: "qwen3.8-max-0902", efforts: ["low", "medium", "xhigh"] },
+    { modelId: "qwen3.8-flash", efforts: ["low", "medium", "xhigh"] },
+    { modelId: "deepseek-v4.1-flash", efforts: ["low", "high", "max"] },
+    { modelId: "kimi/kimi-k3", efforts: ["max"] },
+  ])(
+    "uses built-in DashScope reasoning variants for $modelId when upstream omits them",
+    async ({ modelId, efforts }) => {
+      enabledProviders = ["dashscope"]
+      providerConfigs.dashscope = createProviderConfig(
+        "dashscope",
+        "https://dashscope.example",
+      )
+      fetchMock.mockImplementationOnce(() =>
+        Promise.resolve(Response.json({ data: [{ id: modelId }] })),
+      )
+      const response = await createApp().request("/v1/models", {
+        headers: { "user-agent": "opencode" },
+      })
+      const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+      expect(data[0].id).toBe(`dashscope/${modelId}`)
+      expect(data[0].variants.map((variant) => variant.id)).toEqual(efforts)
+      expect(data[0].variants.at(-1)?.body).toEqual({
+        reasoning: { effort: efforts.at(-1) },
+      })
+    },
+  )
+
+  test("allows user-configured reasoning levels to override DashScope defaults", async () => {
+    enabledProviders = ["dashscope"]
+    providerConfigs.dashscope = {
+      ...createProviderConfig("dashscope", "https://dashscope.example"),
+      models: { "qwen3.8-max": { reasoningEfforts: ["medium"] } },
+    }
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(
+        Response.json({
+          data: [{ id: "qwen3.8-max", reasoning_efforts: ["low", "high"] }],
+        }),
+      ),
+    )
+    const response = await createApp().request("/v1/models", {
+      headers: { "user-agent": "opencode" },
+    })
+    const { data } = (await response.json()) as { data: Array<OpencodeModel> }
+    expect(data[0].variants).toEqual([
+      { id: "medium", body: { reasoning: { effort: "medium" } } },
+    ])
+  })
+
   test.each([
     { path: "/v1/models", userAgent: "curl/8.0" },
     { path: "/v1/models", userAgent: "claude-cli/2.1.258" },

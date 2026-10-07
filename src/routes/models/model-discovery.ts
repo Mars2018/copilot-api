@@ -16,6 +16,7 @@ import { withModelDisplayName } from "~/lib/model-display-name"
 import { getOpencodeGoModelRecords } from "~/lib/models-dev-cache"
 import { toClientModelId } from "~/lib/models"
 import { resolveProviderConfig } from "~/lib/provider-resolver"
+import { getProviderAgentModels } from "~/lib/provider-management"
 import { state } from "~/lib/state"
 import type { Model } from "~/lib/types/models"
 import { getModels as getCodexModels } from "~/services/codex/get-models"
@@ -54,6 +55,28 @@ export function getStringField(
 ): string | undefined {
   const value = model[field]
   return typeof value === "string" && value.trim() ? value : undefined
+}
+
+export function getRecordField(
+  model: Record<string, unknown> | undefined,
+  field: string,
+): Record<string, unknown> | undefined {
+  const value = model?.[field]
+  return isRecord(value) ? value : undefined
+}
+
+export function getFirstPositiveNumber(
+  model: Record<string, unknown> | undefined,
+  fields: Array<string>,
+): number | undefined {
+  if (!model) return undefined
+  for (const field of fields) {
+    const value = model[field]
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return value
+    }
+  }
+  return undefined
 }
 
 type ProviderModelsFallbackReason = "error" | "invalid_body" | "non_ok"
@@ -243,9 +266,40 @@ export async function getAggregatedModels(
   )
 }
 
+function selectAgentCopilotModels(models: Array<Model>): Array<Model> {
+  const selection = getProviderAgentModels(
+    getRawProviderConfig(GITHUB_COPILOT_PROVIDER),
+  )
+  if (selection === undefined) return models
+  return models.filter(
+    (model) =>
+      selection.includes(model.id)
+      || selection.includes(toClientModelId(model.id)),
+  )
+}
+
+function selectAgentProviderModels(
+  providerConfig: ProviderConfig | null,
+  models: Array<unknown>,
+): Array<unknown> {
+  const selection = getProviderAgentModels(providerConfig)
+  if (selection === undefined) return models
+  const modelsById = getModelsById(models)
+  return selection.map((id) => modelsById.get(id) ?? { id })
+}
+
+export async function getAgentModels(
+  requestHeaders: Headers,
+): Promise<Array<ClientModel>> {
+  return getAggregatedModels(requestHeaders, {
+    selectCopilotModels: selectAgentCopilotModels,
+    selectProviderModels: selectAgentProviderModels,
+  })
+}
+
 export function createModelListResponse(
   c: Context,
-  models: Array<ClientModel>,
+  models: Array<{ id: string }>,
 ): Response {
   return c.json({
     object: "list",

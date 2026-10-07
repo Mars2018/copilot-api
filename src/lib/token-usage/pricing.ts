@@ -323,7 +323,7 @@ function normalizePrice(value: number | null | undefined): number | null {
     : null
 }
 
-function resolveProviderCurrency(
+export function resolveProviderCurrency(
   providerName: string,
   configuredCurrency: string | null | undefined,
 ): string | null {

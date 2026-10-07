@@ -4,7 +4,8 @@ import { Hono } from "hono"
 import type { ResolvedProviderConfig } from "~/lib/config"
 import { installModelsDevCatalog } from "~/lib/models-dev-cache"
 import { state } from "~/lib/state"
-import type { ResponsesResult } from "~/lib/types/responses"
+import type { ResponsesPayload, ResponsesResult } from "~/lib/types/responses"
+import { codexResponsesDependencies } from "~/services/codex/create-responses"
 
 import { modelsDevCatalogFixture } from "./fixtures/models-dev-catalog"
 
@@ -153,6 +154,145 @@ afterEach(async () => {
 
   await closeUsageStore()
   Reflect.deleteProperty(process.env, DB_PATH_ENV)
+})
+
+describe("OpenCode provider Responses forwarding", () => {
+  test.each(["codex", "xai"])(
+    "preserves PDF input and reasoning for OpenCode requests to %s",
+    async (provider) => {
+      const model = provider === "codex" ? "gpt-6-luna" : "grok-4.7"
+      const baseUrl = `https://${provider}.example`
+      providerConfig = {
+        apiKey: "provider-key",
+        authType: provider === "codex" ? "oauth2" : "authorization",
+        baseUrl,
+        models: { [model]: { reasoningEfforts: ["high"] } },
+        name: provider,
+        type: "openai-responses",
+      }
+      const originalAccessToken = state.codexAccessToken
+      const originalAccountId = state.codexAccountId
+      state.codexAccessToken = "synthetic-codex-token"
+      state.codexAccountId = "synthetic-account"
+      const payload: ResponsesPayload = {
+        model: `${provider}/${model}`,
+        reasoning: { effort: "high" },
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [
+              {
+                type: "input_file",
+                file_data: "data:application/pdf;base64,pdf-data",
+                filename: "report.pdf",
+              },
+            ],
+          },
+        ],
+      }
+
+      try {
+        const response = await createApp().request("/v1/responses", {
+          body: JSON.stringify(payload),
+          headers: {
+            "content-type": "application/json",
+            "user-agent": "opencode/2.0.24",
+          },
+          method: "POST",
+        })
+
+        expect(response.status).toBe(200)
+        expect(fetchMock).toHaveBeenCalledTimes(1)
+        const [url, init] = fetchMock.mock.calls[0]
+        expect(url).toBe(
+          `${baseUrl}/${provider === "codex" ? "codex" : "v1"}/responses`,
+        )
+        const body = parseJsonRequestBody(init?.body) as ResponsesPayload
+        expect(body.model).toBe(model)
+        expect(body.input).toEqual(payload.input)
+        expect(body.reasoning).toEqual({ effort: "high" })
+        expect(body).not.toHaveProperty("output_config")
+      } finally {
+        state.codexAccessToken = originalAccessToken
+        state.codexAccountId = originalAccountId
+      }
+    },
+  )
+
+  test("forwards OpenCode native compaction triggers through the regular Codex Responses endpoint", async () => {
+    const originalAccessToken = state.codexAccessToken
+    const originalAccountId = state.codexAccountId
+    const originalWebSocketEnabled =
+      codexResponsesDependencies.isResponsesApiWebSocketEnabled
+    providerConfig = {
+      apiKey: "provider-key",
+      authType: "oauth2",
+      baseUrl: "https://codex.example",
+      name: "codex",
+      type: "openai-responses",
+    }
+    state.codexAccessToken = "synthetic-codex-token"
+    state.codexAccountId = "synthetic-account"
+    codexResponsesDependencies.isResponsesApiWebSocketEnabled = () => false
+    responsesUtilsDependencies.isContextManagementEnabledForResponses = () =>
+      true
+    const result: ResponsesResult = {
+      ...createResponsesResult("gpt-6-luna"),
+      output: [
+        {
+          id: "cmp-opencode",
+          type: "compaction",
+          encrypted_content: "encrypted-opencode-checkpoint",
+        },
+      ],
+    }
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: result })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      ),
+    )
+    const payload: ResponsesPayload = {
+      model: "codex/gpt-6-luna",
+      stream: true,
+      input: [
+        {
+          role: "user",
+          content: [{ type: "input_text", text: "Earlier work" }],
+        },
+        { type: "compaction_trigger" },
+      ],
+    }
+
+    try {
+      const response = await createApp().request("/v1/responses", {
+        body: JSON.stringify(payload),
+        headers: {
+          "content-type": "application/json",
+          "user-agent": "opencode/2.0.24",
+        },
+        method: "POST",
+      })
+      expect(response.status).toBe(200)
+      expect(await response.text()).toContain("encrypted-opencode-checkpoint")
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const [url, init] = fetchMock.mock.calls[0]
+      expect(url).toBe("https://codex.example/codex/responses")
+      const body = parseJsonRequestBody(init?.body) as ResponsesPayload
+      expect(body.model).toBe("gpt-6-luna")
+      expect(body.input).toEqual(payload.input)
+      expect(body.context_management).toBeUndefined()
+      expect(body.stream).toBe(true)
+    } finally {
+      state.codexAccessToken = originalAccessToken
+      state.codexAccountId = originalAccountId
+      codexResponsesDependencies.isResponsesApiWebSocketEnabled =
+        originalWebSocketEnabled
+    }
+  })
 })
 
 describe("Codex task title model routing on provider Responses", () => {
