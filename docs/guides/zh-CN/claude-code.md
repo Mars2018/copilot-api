@@ -28,10 +28,10 @@ npx @jeffreycao/copilot-api@latest start
     "ANTHROPIC_BASE_URL": "http://localhost:4141",
     "ANTHROPIC_AUTH_TOKEN": "dummy",
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
-    "ANTHROPIC_MODEL": "gpt-5.6-sol[1m]",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.6-sol[1m]",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.6-sol[1m]",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.6-luna[1m]",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-6.1-sol[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-6.1-sol[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-6.1-sol[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-6-luna[1m]",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "272000",
     "CLAUDE_CODE_USE_VERTEX": "0",
     "CLAUDE_CODE_USE_BEDROCK": "0",
@@ -53,7 +53,7 @@ npx @jeffreycao/copilot-api@latest start
 - `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1"` 让 Claude Code 的 `/model` 菜单发现网关模型，参见[官方网关配置说明](https://code.claude.com/docs/en/llm-gateway-connect#add-gateway-models-to-the-model-picker)。当 User-Agent 包含 `claude`（不区分大小写）时，`/v1/models` 会给本身不含 `claude` 的模型名添加 `my-claude-`，保留 provider 前缀，并给所有模型 ID 追加 `[1m]`，不判断上下文大小。例如 `opencode-go/glm-5.3-flash` 返回为 `opencode-go/my-claude-glm-5.3-flash[1m]`，`claude-opus-4-8` 返回为 `claude-opus-4-8[1m]`。Messages 和 token 计数接口会在模型映射及 provider 路由前去掉这个兼容前缀和 `[1m]` 后缀；其他客户端的模型 ID 保持原有格式。
 - 桌面端 **Coding Agent 展示模型** 通过 `agentsModels` 同时控制 Codex 和 Claude Code 的发现列表。填写上游原始模型 ID，不加 `my-claude-`、`[1m]` 或网关 provider 前缀。
 - 模型显示名包含 provider，例如 `GLM-5.3-Flash (opencode-go)`。已有显示名会作为基础，已有相同 provider 前缀或后缀时不重复添加；Copilot 模型标记为 `github-copilot`。
-- 请根据需要替换 `ANTHROPIC_MODEL`、`ANTHROPIC_DEFAULT_OPUS_MODEL`、`ANTHROPIC_DEFAULT_SONNET_MODEL` 和 `ANTHROPIC_DEFAULT_HAIKU_MODEL`。配置完成后，请安装 claude code 插件，见 [插件集成](integrations.md#plugin-integrations)。
+- 请根据需要替换 `ANTHROPIC_DEFAULT_FABLE_MODEL`、`ANTHROPIC_DEFAULT_OPUS_MODEL`、`ANTHROPIC_DEFAULT_SONNET_MODEL` 和 `ANTHROPIC_DEFAULT_HAIKU_MODEL`。配置完成后，请安装 claude code 插件，见 [插件集成](integrations.md#plugin-integrations)。
 - `CLAUDE_CODE_TOTAL_TOKENS_REMINDER: "off"` 用于关闭 Claude Code 的 total tokens 提醒功能。该功能开启时会在对话中注入 `<total_tokens>N tokens left</total_tokens>` 块，提示模型剩余的 token 预算；默认预算为 1500w（15,000,000）tokens，意义不大，因此这里配置为关闭。
 - 将 `CLAUDE_CODE_ATTRIBUTION_HEADER` 设为 `0` 可以阻止 Claude Code 在 system prompt 中附加计费和版本信息，从而避免 prompt cache 失效。
 - 关闭 `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` 和 `CLAUDE_CODE_ENABLE_AWAY_SUMMARY` 可以避免不必要地消耗额度。

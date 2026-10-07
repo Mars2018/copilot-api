@@ -24,10 +24,10 @@ Here is an example `.claude/settings.json` file:
     "ANTHROPIC_BASE_URL": "http://localhost:4141",
     "ANTHROPIC_AUTH_TOKEN": "dummy",
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
-    "ANTHROPIC_MODEL": "gpt-5.6-sol[1m]",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.6-sol[1m]",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.6-sol[1m]",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.6-luna[1m]",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-6.1-sol[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-6.1-sol[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-6.1-sol[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-6-luna[1m]",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "272000",
     "CLAUDE_CODE_USE_VERTEX": "0",
     "CLAUDE_CODE_USE_BEDROCK": "0",
@@ -49,7 +49,7 @@ Here is an example `.claude/settings.json` file:
 - `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1"` enables gateway models in Claude Code's `/model` picker. See the [official gateway configuration guide](https://code.claude.com/docs/en/llm-gateway-connect#add-gateway-models-to-the-model-picker). For requests whose User-Agent contains `claude` (case-insensitive), `/v1/models` adds `my-claude-` to model names that do not already contain `claude`, preserving the provider prefix, and appends `[1m]` to every model ID regardless of its context window: `opencode-go/glm-5.3-flash` becomes `opencode-go/my-claude-glm-5.3-flash[1m]`, while `claude-opus-4-8` becomes `claude-opus-4-8[1m]`. Messages and token-counting requests remove the compatibility prefix and `[1m]` suffix before model mappings and provider routing. Other clients retain the existing model IDs.
 - The desktop's **Models shown in Coding Agent** selection applies to both Codex and Claude Code discovery through `agentsModels`; selections use original upstream model IDs without `my-claude-`, `[1m]`, or the gateway provider prefix.
 - Model display names identify their provider, for example `GLM-5.3-Flash (opencode-go)`. Existing labels are used as the base; a matching provider prefix or suffix is not repeated. Copilot entries use `github-copilot`.
-- Replace `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, and `ANTHROPIC_DEFAULT_HAIKU_MODEL` according to your needs. After configuration, please install the claude code plugin [Plugin Integrations](integrations.md#plugin-integrations).  
+- Replace `ANTHROPIC_DEFAULT_FABLE_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, and `ANTHROPIC_DEFAULT_HAIKU_MODEL` according to your needs. After configuration, please install the claude code plugin [Plugin Integrations](integrations.md#plugin-integrations).  
 - `CLAUDE_CODE_TOTAL_TOKENS_REMINDER: "off"` disables Claude Code's total-tokens reminder, which injects a `<total_tokens>N tokens left</total_tokens>` block into the conversation to pace the model against a remaining token budget. The default budget is 15,000,000 (15M) tokens, which is not very meaningful, so it is turned off here.
 - Setting CLAUDE_CODE_ATTRIBUTION_HEADER to 0 can prevent Claude code from adding billing and version information in system prompts, thereby avoiding prompt cache invalidation.
 - Turning off CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION and CLAUDE_CODE_ENABLE_AWAY_SUMMARY can prevent quota from being consumed unnecessarily.
