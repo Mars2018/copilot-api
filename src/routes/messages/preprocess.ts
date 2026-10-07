@@ -10,6 +10,7 @@ import {
   compactTextOnlyGuard,
   type CompactType,
 } from "~/lib/compact"
+import { isClaudeUserAgent } from "~/lib/claude-models"
 import { getReasoningEffortForModel } from "~/lib/config"
 import { normalizeSdkModelId } from "~/lib/models"
 
@@ -386,6 +387,20 @@ export const getCompactType = (
   }
 
   return 0
+}
+
+export const applyClaudeNoToolsEffort = (
+  payload: AnthropicMessagesPayload,
+  userAgent: string | undefined,
+): void => {
+  if (!isClaudeUserAgent(userAgent) || (payload.tools?.length ?? 0) > 0) {
+    return
+  }
+
+  payload.output_config = {
+    ...payload.output_config,
+    effort: "low",
+  }
 }
 
 /**
@@ -963,6 +978,7 @@ export const prepareMessagesApiPayload = (
         | "max"
     }
     payload.output_config = {
+      ...payload.output_config,
       effort: effort,
     }
   }

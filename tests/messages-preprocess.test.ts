@@ -1035,6 +1035,31 @@ describe("sanitizeIdeTools", () => {
 })
 
 describe("prepareMessagesApiPayload", () => {
+  test("preserves low effort and output format with adaptive thinking", () => {
+    const outputConfig: AnthropicMessagesPayload["output_config"] = {
+      effort: "low",
+      format: { type: "json_schema", schema: { type: "object" } },
+    }
+    const payload: AnthropicMessagesPayload = {
+      model: "claude-opus-4.8",
+      max_tokens: 128,
+      messages: [{ role: "user", content: "hello" }],
+      output_config: outputConfig,
+    }
+
+    prepareMessagesApiPayload(payload, {
+      capabilities: {
+        supports: {
+          adaptive_thinking: true,
+          reasoning_effort: ["low", "medium", "high", "max"],
+        },
+      },
+    } as never)
+
+    expect(payload.output_config).toEqual(outputConfig)
+    expect(payload.thinking?.type).toBe("adaptive")
+  })
+
   test("strips cache_control scope, filters thinking blocks, and enables adaptive thinking", () => {
     const payload: AnthropicMessagesPayload = {
       model: "gpt-5.4",

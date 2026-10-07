@@ -79,6 +79,7 @@ import {
 } from "~/routes/messages/web-search/fulfill"
 import {
   appendClaudeContinuationMessage,
+  applyClaudeNoToolsEffort,
   isClaudeAutoModelRequest,
   normalizeSystemMessages,
 } from "~/routes/messages/preprocess"
@@ -114,6 +115,7 @@ export async function handleProviderMessages(
   const provider = c.req.param("provider")
   const payload = await c.req.json<AnthropicMessagesPayload>()
   payload.model = fromClaudeDiscoveryModelId(payload.model)
+  applyClaudeNoToolsEffort(payload, c.req.header("user-agent"))
 
   const claudeAutoModel = getClaudeAutoModel()
   if (claudeAutoModel && isClaudeAutoModelRequest(payload)) {

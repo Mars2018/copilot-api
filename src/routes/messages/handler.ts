@@ -35,6 +35,7 @@ import {
 } from "./api-flows"
 import {
   appendClaudeContinuationMessage,
+  applyClaudeNoToolsEffort,
   applyLastMessageCacheControl,
   getCompactType,
   getLastMessageContentCacheControl,
@@ -59,6 +60,7 @@ export const messagesFlowHandlers = {
 export async function handleCompletion(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   anthropicPayload.model = fromClaudeDiscoveryModelId(anthropicPayload.model)
+  applyClaudeNoToolsEffort(anthropicPayload, c.req.header("user-agent"))
 
   return await handleCompletionPayload(c, anthropicPayload)
 }

@@ -3,6 +3,8 @@ import { Hono } from "hono"
 
 import type { ResolvedProviderConfig } from "~/lib/config"
 import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
+import type { ChatCompletionResponse } from "~/lib/types/chat-completions"
+import type { ResponsesResult } from "~/lib/types/responses"
 import { UpstreamStreamInactivityTimeoutError } from "~/lib/error"
 import type { UsageTokens } from "~/lib/token-usage"
 
@@ -200,6 +202,108 @@ afterEach(() => {
 })
 
 describe("provider Messages Anthropic forwarding", () => {
+  test.each(["anthropic", "openai-compatible", "openai-responses"] as const)(
+    "forces low effort for Claude without tools through a %s provider",
+    async (type) => {
+      providerConfig = { ...createProviderConfig(), type }
+      if (type === "openai-compatible") {
+        upstreamResponseFactory = () =>
+          Response.json({
+            id: "chatcmpl-test",
+            object: "chat.completion",
+            created: 0,
+            model: "claude-sonnet-4",
+            choices: [
+              {
+                index: 0,
+                message: { role: "assistant", content: "ok" },
+                logprobs: null,
+                finish_reason: "stop",
+              },
+            ],
+          } satisfies ChatCompletionResponse)
+      } else if (type === "openai-responses") {
+        upstreamResponseFactory = () =>
+          Response.json({
+            id: "resp-test",
+            object: "response",
+            created_at: 0,
+            model: "claude-sonnet-4",
+            output: [],
+            output_text: "",
+            status: "completed",
+            error: null,
+            incomplete_details: null,
+            instructions: null,
+            metadata: null,
+            parallel_tool_calls: false,
+            temperature: null,
+            tool_choice: "auto",
+            tools: [],
+            top_p: null,
+          } satisfies ResponsesResult)
+      }
+      const response = await createApp().request("/openrouter/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "user-agent": "Claude-Code/2.1.258",
+        },
+        body: JSON.stringify(
+          createMessagesPayload({
+            tools: [],
+            output_config: { effort: "max" },
+          }),
+        ),
+      })
+
+      expect(response.status).toBe(200)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const body = fetchMock.mock.calls[0][1]?.body
+      expect(typeof body).toBe("string")
+      const forwardedPayload: unknown = JSON.parse(body as string)
+      expect(forwardedPayload).toMatchObject(
+        type === "anthropic" ? { output_config: { effort: "low" } }
+        : type === "openai-compatible" ? { reasoning_effort: "low" }
+        : { reasoning: { effort: "low" } },
+      )
+    },
+  )
+
+  test.each([
+    {
+      userAgent: "claude-cli/2.1.258",
+      tools: [{ name: "lookup", input_schema: { type: "object" } }],
+    },
+    { userAgent: "curl/8.0", tools: [] },
+  ])(
+    "preserves max effort for provider requests with $userAgent and tools $tools",
+    async ({ userAgent, tools }) => {
+      const response = await createApp().request("/openrouter/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "user-agent": userAgent,
+        },
+        body: JSON.stringify(
+          createMessagesPayload({
+            tools,
+            output_config: { effort: "max" },
+          }),
+        ),
+      })
+
+      expect(response.status).toBe(200)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const body = fetchMock.mock.calls[0][1]?.body
+      expect(typeof body).toBe("string")
+      const forwardedPayload = JSON.parse(
+        body as string,
+      ) as AnthropicMessagesPayload
+      expect(forwardedPayload.output_config?.effort).toBe("max")
+    },
+  )
+
   test.each([
     { provider: "openrouter", model: "claude-sonnet-4" },
     { provider: "anthropic", model: "claude-sonnet-4" },

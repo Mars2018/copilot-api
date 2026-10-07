@@ -147,6 +147,100 @@ afterEach(() => {
 })
 
 describe("messages handler orchestration", () => {
+  test.each<{
+    name: string
+    userAgent?: string
+    tools?: AnthropicMessagesPayload["tools"]
+    outputConfig?: AnthropicMessagesPayload["output_config"]
+    expectedEffort?: NonNullable<
+      AnthropicMessagesPayload["output_config"]
+    >["effort"]
+  }>([
+    {
+      name: "Claude without tools overrides max",
+      userAgent: "claude-cli/2.1.258",
+      outputConfig: { effort: "max" },
+      expectedEffort: "low",
+    },
+    {
+      name: "mixed-case Claude with empty tools overrides high",
+      userAgent: "Claude-Code/2.1.258",
+      tools: [],
+      outputConfig: { effort: "high" },
+      expectedEffort: "low",
+    },
+    {
+      name: "embedded Claude without output config adds low",
+      userAgent: "vscode_claude_code/2.1.258 (external, sdk-ts)",
+      expectedEffort: "low",
+    },
+    {
+      name: "Claude keeps the output format when adding low",
+      userAgent: "claude-cli/2.1.258",
+      outputConfig: {
+        format: { type: "json_schema", schema: { type: "object" } },
+      },
+      expectedEffort: "low",
+    },
+    {
+      name: "Claude with tools keeps max",
+      userAgent: "claude-cli/2.1.258",
+      tools: [{ name: "lookup", input_schema: { type: "object" } }],
+      outputConfig: { effort: "max" },
+      expectedEffort: "max",
+    },
+    {
+      name: "other clients keep max",
+      userAgent: "opencode/1.0.0",
+      outputConfig: { effort: "max" },
+      expectedEffort: "max",
+    },
+    {
+      name: "missing user agent keeps max",
+      outputConfig: { effort: "max" },
+      expectedEffort: "max",
+    },
+    {
+      name: "empty user agent keeps output config absent",
+      userAgent: "",
+    },
+  ])(
+    "applies Claude effort policy before every upstream flow: $name",
+    async ({ userAgent, tools, outputConfig, expectedEffort }) => {
+      for (const [endpoint, flow] of [
+        ["/v1/messages", handleWithMessagesApi],
+        ["/responses", handleWithResponsesApi],
+        ["/chat/completions", handleWithChatCompletions],
+      ] as const) {
+        selectedModel = {
+          id: "upstream-model",
+          supported_endpoints: [endpoint],
+        }
+        const headers: Record<string, string> = {
+          "content-type": "application/json",
+        }
+        if (userAgent !== undefined) headers["user-agent"] = userAgent
+        const response = await createApp().request("/", {
+          method: "POST",
+          headers,
+          body: JSON.stringify(
+            createPayload({ tools, output_config: outputConfig }),
+          ),
+        })
+
+        expect(response.status).toBe(200)
+        expect(flow).toHaveBeenCalledTimes(1)
+        const forwardedPayload = flow.mock.calls[0][1]
+        expect(forwardedPayload.output_config).toEqual(
+          expectedEffort ?
+            { ...outputConfig, effort: expectedEffort }
+          : outputConfig,
+        )
+        expect(forwardedPayload.tools).toEqual(tools)
+      }
+    },
+  )
+
   test.each([
     { endpoint: "/v1/messages", responseBody: "messages" },
     { endpoint: "/responses", responseBody: "responses" },
@@ -842,38 +936,67 @@ describe("messages handler orchestration", () => {
     expect(options.anthropicBetaHeader).toBe("warmup-beta")
   })
 
-  test("keeps the Claude auto model override ahead of warmup selection", async () => {
-    claudeAutoModel = "auto-model"
-    selectedModel = {
-      id: "auto-model",
-      supported_endpoints: ["/v1/messages"],
-    }
+  test.each<{
+    name: string
+    system: AnthropicMessagesPayload["system"]
+  }>([
+    {
+      name: "string",
+      system:
+        "You are a security monitor for autonomous AI coding agents. Check the changes.",
+    },
+    {
+      name: "text block array",
+      system: [
+        {
+          type: "text",
+          text: "You are a security monitor for autonomous AI coding agents. Check the changes.",
+        },
+      ],
+    },
+    {
+      name: "text block array with a preceding billing header",
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.158.c0c; cc_entrypoint=cli; cch=6fb32;",
+        },
+        {
+          type: "text",
+          text: "You are a security monitor for autonomous AI coding agents. Check the changes.",
+        },
+      ],
+    },
+  ])(
+    "selects the Claude auto model for system as $name",
+    async ({ system }) => {
+      claudeAutoModel = "auto-model"
+      selectedModel = {
+        id: "auto-model",
+        supported_endpoints: ["/v1/messages"],
+      }
 
-    const app = createApp()
-    const response = await app.request("/", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "anthropic-beta": "warmup-beta",
-      },
-      body: JSON.stringify(
-        createPayload({
-          stop_sequences: ["</block>"],
-          system: [
-            {
-              type: "text",
-              text: "You are a security monitor for autonomous AI coding agents. Check the changes.",
-            },
-          ],
-        }),
-      ),
-    })
+      const app = createApp()
+      const response = await app.request("/", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "anthropic-beta": "warmup-beta",
+        },
+        body: JSON.stringify(
+          createPayload({
+            stop_sequences: ["</block>"],
+            system,
+          }),
+        ),
+      })
 
-    expect(response.status).toBe(200)
-    expect(await response.text()).toBe("messages")
-    expect(findEndpointModel).toHaveBeenCalledTimes(1)
-    expect(findEndpointModel).toHaveBeenCalledWith("auto-model")
-  })
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe("messages")
+      expect(findEndpointModel).toHaveBeenCalledTimes(1)
+      expect(findEndpointModel).toHaveBeenCalledWith("auto-model")
+    },
+  )
 
   test("prefers the root session header when dispatching to the Messages API", async () => {
     selectedModel = {
