@@ -100,7 +100,8 @@ export const handleResponses = async (c: Context) => {
 
   const incomingSessionId = getIncomingResponsesSessionId(c)
   const sessionId = incomingSessionId ? getUUID(incomingSessionId) : undefined
-  const threadId = c.req.header("thread-id")
+  const threadId =
+    c.req.header("thread-id") ?? c.req.header("x-opencode-session-id")
   const requestId =
     threadId ?
       getUUID(threadId + "_")
