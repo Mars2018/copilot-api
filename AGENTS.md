@@ -14,7 +14,7 @@ Run from the repository root unless noted:
 - `bun run build`: package build; `bun run build:desktop`: desktop server bundle.
 - `bun run typecheck` / `bun run lint`: gateway TypeScript / ESLint checks.
 - `bun run typecheck:all` / `bun run lint:all`: gateway and desktop checks.
-- `bun test tests/provider-resolver.test.ts`: one test file; `bun test tests`: gateway suite; `bun test`: all discovered tests.
+- `bun test tests/provider-resolver.test.ts`: one test file; use explicit `tests` and/or `desktop/tests` directories for larger suites, and capture their output as described below.
 - `bun run --cwd desktop test`: desktop tests; `bun run --cwd desktop build`: Electron app build.
 
 ## Code Style
@@ -27,6 +27,7 @@ Run from the repository root unless noted:
 ## Verification
 
 - Use Bun tests named `*.test.ts` in `tests/` or `desktop/tests/`, matching the affected package.
+- Never run bare `bun test` or stream unfiltered test-suite output into the conversation. Always specify test files/directories and redirect stdout and stderr to a temporary log file; inspect and report only the result summary, relevant failures, and changed-code coverage.
 - Changed code must reach at least 80% unit test coverage; use `bun test --coverage <test-files>` to inspect coverage.
 - Test affected request translation, providers, auth, config, and streaming edge cases; run the relevant tests, lint, and typecheck for code changes, expanding validation for shared behavior.
 - For documentation-only changes, verify referenced paths/commands and inspect the diff; application tests are unnecessary.
