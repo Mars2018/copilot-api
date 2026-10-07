@@ -29,6 +29,7 @@ Here is an example `.claude/settings.json` file:
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-6.1-sol[1m]",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-6-luna[1m]",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "272000",
+    "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
     "CLAUDE_CODE_USE_VERTEX": "0",
     "CLAUDE_CODE_USE_BEDROCK": "0",
     "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
