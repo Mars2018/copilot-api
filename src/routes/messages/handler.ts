@@ -100,17 +100,21 @@ export async function handleCompletionPayload(
     if (webSearchResult) return webSearchResult
   }
 
-  const claudeAutoModel = getClaudeAutoModel()
+  const claudeAutoModel = getClaudeAutoModel(true)
   const shouldUseClaudeAutoModel = Boolean(
     !dispatchOptions.skipClaudeAutoModel
       && claudeAutoModel
       && isClaudeAutoModelRequest(anthropicPayload),
   )
   if (claudeAutoModel && shouldUseClaudeAutoModel) {
+    const resolvedClaudeAutoModel =
+      dispatchOptions.skipModelMapping ? claudeAutoModel : (
+        resolveMappedModel(claudeAutoModel)
+      )
     consola.debug(
-      `Claude auto model override: ${anthropicPayload.model} -> ${claudeAutoModel}`,
+      `Claude auto model override: ${anthropicPayload.model} -> ${resolvedClaudeAutoModel}`,
     )
-    anthropicPayload.model = claudeAutoModel
+    anthropicPayload.model = resolvedClaudeAutoModel
   }
 
   const providerModelAlias = await resolveConfiguredProviderModelAlias(

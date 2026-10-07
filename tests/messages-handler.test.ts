@@ -19,6 +19,9 @@ const actualConfigModule = await import("~/lib/config")
 const actualModelsModule = await import("~/lib/models")
 const actualUtilsModule = await import("~/lib/utils")
 const { responsesUtilsDependencies } = await import("~/routes/responses/utils")
+const actualProviderMessagesModule = await import(
+  "~/routes/provider/messages/handler"
+)
 
 const state = {
   ...actualStateModule.state,
@@ -995,6 +998,79 @@ describe("messages handler orchestration", () => {
       expect(await response.text()).toBe("messages")
       expect(findEndpointModel).toHaveBeenCalledTimes(1)
       expect(findEndpointModel).toHaveBeenCalledWith("auto-model")
+    },
+  )
+
+  test("routes the default Claude auto model to the Codex provider", async () => {
+    claudeAutoModel = "codex-auto-review"
+    modelMappings = { ...actualConfigModule.defaultConfig.modelMappings }
+    const providerResolver = spyOn(
+      actualProviderMessagesModule.providerMessagesHandlerDependencies,
+      "resolveProviderConfig",
+    ).mockResolvedValue({
+      name: "codex",
+      type: "openai-responses",
+      baseUrl: "https://chatgpt.com/backend-api",
+      apiKey: "test-token",
+      authType: "oauth2",
+    })
+    const providerHandler = spyOn(
+      actualProviderMessagesModule,
+      "handleProviderMessagesForProvider",
+    ).mockResolvedValue(new Response("codex"))
+    try {
+      const response = await createApp().request("/", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          createPayload({
+            stop_sequences: ["</block>"],
+            system:
+              "You are a security monitor for autonomous AI coding agents. Check the changes.",
+          }),
+        ),
+      })
+
+      expect(await response.text()).toBe("codex")
+      expect(providerResolver).toHaveBeenCalledWith("codex")
+      expect(providerHandler).toHaveBeenCalledTimes(1)
+      const { payload, provider } = providerHandler.mock.calls[0][1]
+      expect(provider).toBe("codex")
+      expect(payload.model).toBe("codex-auto-review")
+      expect(findEndpointModel).not.toHaveBeenCalled()
+    } finally {
+      providerResolver.mockRestore()
+      providerHandler.mockRestore()
+    }
+  })
+
+  test.each([
+    { skipModelMapping: false, expected: "gpt-6-luna" },
+    { skipModelMapping: true, expected: "codex-auto-review" },
+  ])(
+    "resolves the Claude auto model with skipModelMapping=$skipModelMapping",
+    async ({ skipModelMapping, expected }) => {
+      claudeAutoModel = "codex-auto-review"
+      modelMappings = { "codex-auto-review": "gpt-6-luna" }
+      selectedModel = { id: expected, supported_endpoints: ["/v1/messages"] }
+
+      const app = new Hono()
+      app.post("/", (c) =>
+        handleCompletionPayload(
+          c,
+          createPayload({
+            stop_sequences: ["</block>"],
+            system:
+              "You are a security monitor for autonomous AI coding agents. Check the changes.",
+          }),
+          { skipModelMapping },
+        ),
+      )
+      const response = await app.request("/", { method: "POST" })
+
+      expect(response.status).toBe(200)
+      expect(findEndpointModel).toHaveBeenCalledWith(expected)
+      expect(handleWithMessagesApi.mock.calls[0][1].model).toBe(expected)
     },
   )
 

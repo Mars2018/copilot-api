@@ -3,6 +3,77 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
+import type { AppConfig } from "~/lib/config-store"
+import { isGitHubCopilotAvailable } from "~/lib/github-copilot-provider"
+import type { State } from "~/lib/state"
+
+test.each<{
+  name: string
+  config: AppConfig
+  runtime: Pick<State, "githubToken" | "copilotToken">
+  expected: boolean
+}>([
+  {
+    name: "missing config and credentials",
+    config: {},
+    runtime: {},
+    expected: false,
+  },
+  {
+    name: "missing config with ready credentials",
+    config: {},
+    runtime: {
+      githubToken: "test-github-token",
+      copilotToken: "test-copilot-token",
+    },
+    expected: true,
+  },
+  {
+    name: "enabled without credentials",
+    config: { providers: { "github-copilot": { enabled: true } } },
+    runtime: {},
+    expected: false,
+  },
+  {
+    name: "enabled with only a GitHub token",
+    config: { providers: { "github-copilot": { enabled: true } } },
+    runtime: { githubToken: "test-github-token" },
+    expected: false,
+  },
+  {
+    name: "enabled with only a Copilot token",
+    config: { providers: { "github-copilot": { enabled: true } } },
+    runtime: { copilotToken: "test-copilot-token" },
+    expected: false,
+  },
+  {
+    name: "enabled with an empty token",
+    config: { providers: { "github-copilot": { enabled: true } } },
+    runtime: { githubToken: "test-github-token", copilotToken: "" },
+    expected: false,
+  },
+  {
+    name: "enabled with ready credentials",
+    config: { providers: { "github-copilot": { enabled: true } } },
+    runtime: {
+      githubToken: "test-github-token",
+      copilotToken: "test-copilot-token",
+    },
+    expected: true,
+  },
+  {
+    name: "disabled with ready credentials",
+    config: { providers: { "github-copilot": { enabled: false } } },
+    runtime: {
+      githubToken: "test-github-token",
+      copilotToken: "test-copilot-token",
+    },
+    expected: false,
+  },
+])("Copilot availability: $name", ({ config, runtime, expected }) => {
+  expect(isGitHubCopilotAvailable(config, runtime)).toBe(expected)
+})
+
 // Use a separate module graph so route mocks from other test files cannot hide request guards.
 test("builtin Copilot defaults on, blocks all transports when disabled, and preserves other providers", async () => {
   const directory = fs.mkdtempSync(

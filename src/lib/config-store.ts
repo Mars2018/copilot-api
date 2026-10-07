@@ -5,6 +5,7 @@ import fs from "node:fs"
 import type { TokenUsagePricingConfig } from "~/lib/token-usage/pricing"
 
 import { writeFileAtomically } from "./atomic-file"
+import { isGitHubCopilotAvailable } from "./github-copilot-provider"
 import { PATHS } from "./paths"
 
 export interface AppConfig {
@@ -42,7 +43,10 @@ export interface AppConfig {
   // "You are a security monitor for autonomous AI coding agents.".
   // A `provider/model` alias is forwarded to that provider's message API on
   // the top-level route. Provider message routes use the configured value on
-  // their current provider. Leave empty to disable (default).
+  // their current provider. Defaults to codex-auto-review when Codex is
+  // enabled, otherwise gpt-6-luna when GitHub Copilot is enabled and both its
+  // GitHub and Copilot tokens are loaded. An explicit empty value disables
+  // the override.
   claudeAutoModel?: string
   claudeTokenMultiplier?: number
 }
@@ -617,10 +621,25 @@ export function getMessageApiWebSearchModel(): string | undefined {
   return model && model.trim().length > 0 ? model : undefined
 }
 
-export function getClaudeAutoModel(): string | undefined {
+export function getClaudeAutoModel(
+  useDefault: boolean = false,
+): string | undefined {
   const config = getConfig()
   const model = config.claudeAutoModel
-  return model && model.trim().length > 0 ? model.trim() : undefined
+  if (model !== undefined) {
+    return model && model.trim().length > 0 ? model.trim() : undefined
+  }
+
+  if (!useDefault) {
+    return undefined
+  }
+
+  const codexProvider = config.providers?.codex
+  if (codexProvider && codexProvider.enabled !== false) {
+    return "codex-auto-review"
+  }
+
+  return isGitHubCopilotAvailable(config) ? "gpt-6-luna" : undefined
 }
 
 export function getClaudeTokenMultiplier(): number {
