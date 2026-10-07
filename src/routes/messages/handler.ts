@@ -34,6 +34,7 @@ import {
   handleWithResponsesApi,
 } from "./api-flows"
 import {
+  appendClaudeContinuationMessage,
   applyLastMessageCacheControl,
   getCompactType,
   getLastMessageContentCacheControl,
@@ -194,6 +195,7 @@ export async function handleCompletionPayload(
 
   const selectedModel = findEndpointModel(anthropicPayload.model)
   anthropicPayload.model = selectedModel?.id ?? anthropicPayload.model
+  appendClaudeContinuationMessage(anthropicPayload)
 
   if (shouldUseMessagesApi(selectedModel)) {
     return await messagesFlowHandlers.handleWithMessagesApi(

@@ -909,6 +909,18 @@ const filterAssistantThinkingBlocks = (
   }
 }
 
+export const appendClaudeContinuationMessage = (
+  payload: AnthropicMessagesPayload,
+): void => {
+  const lastMessage = payload.messages.at(-1)
+  if (payload.model.includes("claude") && lastMessage?.role === "assistant") {
+    payload.messages.push({
+      role: "user",
+      content: [{ type: "text", text: "Please continue." }],
+    })
+  }
+}
+
 export const prepareMessagesApiPayload = (
   payload: AnthropicMessagesPayload,
   selectedModel?: Model,

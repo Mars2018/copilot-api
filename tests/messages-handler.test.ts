@@ -148,6 +148,91 @@ afterEach(() => {
 
 describe("messages handler orchestration", () => {
   test.each([
+    { endpoint: "/v1/messages", responseBody: "messages" },
+    { endpoint: "/responses", responseBody: "responses" },
+    { endpoint: "/chat/completions", responseBody: "chat" },
+  ])(
+    "appends a continuation for a mapped Claude model before forwarding to %j",
+    async ({ endpoint, responseBody }) => {
+      modelMappings = { primary: "claude-sonnet-5" }
+      selectedModel = {
+        id: "claude-sonnet-5",
+        supported_endpoints: [endpoint],
+      }
+      const messages: AnthropicMessagesPayload["messages"] = [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "partial answer" },
+      ]
+      const response = await createApp().request("/", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(createPayload({ model: "primary", messages })),
+      })
+
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe(responseBody)
+      const flow =
+        responseBody === "messages" ? handleWithMessagesApi
+        : responseBody === "responses" ? handleWithResponsesApi
+        : handleWithChatCompletions
+      expect(flow).toHaveBeenCalledTimes(1)
+      expect(flow.mock.calls[0][1].messages).toEqual([
+        ...messages,
+        {
+          role: "user",
+          content: [{ type: "text", text: "Please continue." }],
+        },
+      ])
+    },
+  )
+
+  test.each<{
+    model: string
+    resolvedModel?: string
+    messages: AnthropicMessagesPayload["messages"]
+  }>([
+    { model: "claude-sonnet-5", messages: [] },
+    {
+      model: "claude-sonnet-5",
+      messages: [{ role: "user", content: "hello" }],
+    },
+    {
+      model: "claude-sonnet-5",
+      messages: [
+        { role: "assistant", content: "previous answer" },
+        { role: "user", content: "Please continue." },
+      ],
+    },
+    {
+      model: "gpt-5.4",
+      messages: [{ role: "assistant", content: "partial answer" }],
+    },
+    {
+      model: "claude-sonnet-5",
+      resolvedModel: "gpt-5.4",
+      messages: [{ role: "assistant", content: "partial answer" }],
+    },
+  ])(
+    "preserves messages when the resolved conversation does not need a Claude continuation: %j",
+    async ({ model, resolvedModel, messages }) => {
+      modelMappings = resolvedModel ? { [model]: resolvedModel } : {}
+      selectedModel = {
+        id: resolvedModel ?? model,
+        supported_endpoints: ["/v1/messages"],
+      }
+      const response = await createApp().request("/", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(createPayload({ model, messages })),
+      })
+
+      expect(response.status).toBe(200)
+      expect(handleWithMessagesApi).toHaveBeenCalledTimes(1)
+      expect(handleWithMessagesApi.mock.calls[0][1].messages).toEqual(messages)
+    },
+  )
+
+  test.each([
     ["my-claude-glm-5.3-flash", "glm-5.3-flash"],
     ["my-claude-glm-5.3-flash[1m]", "glm-5.3-flash"],
     ["contoso/my-claude-family/glm-5.3-flash", "contoso/family/glm-5.3-flash"],

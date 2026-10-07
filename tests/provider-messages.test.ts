@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { Hono } from "hono"
 
 import type { ResolvedProviderConfig } from "~/lib/config"
+import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
 import { UpstreamStreamInactivityTimeoutError } from "~/lib/error"
 import type { UsageTokens } from "~/lib/token-usage"
 
@@ -35,7 +36,9 @@ const { providerMessagesHandlerDependencies } = await import(
 )
 
 const originalFetch = globalThis.fetch
-const fetchMock = mock(() => Promise.resolve(upstreamResponseFactory()))
+const fetchMock = mock((_input: string | URL | Request, _init?: RequestInit) =>
+  Promise.resolve(upstreamResponseFactory()),
+)
 
 const createApp = () => {
   const app = new Hono()
@@ -197,6 +200,71 @@ afterEach(() => {
 })
 
 describe("provider Messages Anthropic forwarding", () => {
+  test.each([
+    { provider: "openrouter", model: "claude-sonnet-4" },
+    { provider: "anthropic", model: "claude-sonnet-4" },
+    { provider: "openrouter", model: "anthropic/claude-sonnet-4" },
+    { provider: "openrouter", model: "vendor-claude-sonnet-4" },
+  ])(
+    "forwards a user continuation after a trailing Claude assistant message: %j",
+    async ({ provider, model }) => {
+      providerConfig = {
+        ...createProviderConfig(provider),
+        models: { [model]: {} },
+      }
+      const messages: AnthropicMessagesPayload["messages"] = [
+        { role: "user", content: "hello" },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "partial answer" }],
+        },
+      ]
+      const response = await createApp().request(`/${provider}/v1/messages`, {
+        body: JSON.stringify(createMessagesPayload({ model, messages })),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      })
+
+      expect(response.status).toBe(200)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const body = fetchMock.mock.calls[0][1]?.body
+      if (typeof body !== "string") throw new Error("Expected a JSON body")
+      const forwarded = JSON.parse(body) as AnthropicMessagesPayload
+      expect(forwarded.model).toBe(model)
+      expect(forwarded.messages).toEqual([
+        ...messages,
+        {
+          role: "user",
+          content: [{ type: "text", text: "Please continue." }],
+        },
+      ])
+    },
+  )
+
+  test("preserves trailing assistant messages for non-Claude provider models", async () => {
+    providerConfig = {
+      ...createProviderConfig(),
+      models: { "gpt-5.4": { type: "anthropic" } },
+    }
+    const messages: AnthropicMessagesPayload["messages"] = [
+      { role: "assistant", content: "partial answer" },
+    ]
+    const response = await createApp().request("/openrouter/v1/messages", {
+      body: JSON.stringify(
+        createMessagesPayload({ model: "gpt-5.4", messages }),
+      ),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const body = fetchMock.mock.calls[0][1]?.body
+    if (typeof body !== "string") throw new Error("Expected a JSON body")
+    const forwarded = JSON.parse(body) as AnthropicMessagesPayload
+    expect(forwarded.messages).toEqual(messages)
+  })
+
   test("adds an empty thinking signature for OpenRouter JSON responses", async () => {
     const response = await createApp().request("/openrouter/v1/messages", {
       body: JSON.stringify(createMessagesPayload()),

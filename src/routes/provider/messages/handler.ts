@@ -78,6 +78,7 @@ import {
   stripWebSearchServerTool,
 } from "~/routes/messages/web-search/fulfill"
 import {
+  appendClaudeContinuationMessage,
   isClaudeAutoModelRequest,
   normalizeSystemMessages,
 } from "~/routes/messages/preprocess"
@@ -163,6 +164,7 @@ export async function handleProviderMessagesForProvider(
     normalizeSystemMessages(payload)
 
     applyModelDefaults(payload, modelConfig)
+    appendClaudeContinuationMessage(payload)
 
     if (effectiveType === "openai-responses") {
       if (hasWebSearchServerTool(payload)) {
