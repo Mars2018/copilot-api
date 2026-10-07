@@ -160,7 +160,7 @@ describe("OpenCode v2 model discovery plugin", () => {
     expect(headers.get("user-agent")).toContain("opencode")
     expect(headers.get("x-api-key")).toBe("dummy")
     expect(init.signal).toBeInstanceOf(AbortSignal)
-    expect(intervalMock).toHaveBeenCalledWith(expect.any(Function), 20_000)
+    expect(intervalMock).toHaveBeenCalledWith(expect.any(Function), 120_000)
     result.cleanup?.()
     expect(clearMock).toHaveBeenCalledWith(timer)
   })

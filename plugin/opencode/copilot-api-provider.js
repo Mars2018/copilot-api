@@ -12,7 +12,7 @@ export default {
       ?? "http://localhost:4141/v1"
     ).replace(/\/+$/u, "")
     const apiKey = options.apiKey ?? process.env.GITHUB_COPILOT_API_KEY ?? "dummy"
-    const refreshIntervalMs = options.refreshIntervalMs ?? 20_000
+    const refreshIntervalMs = options.refreshIntervalMs ?? 120_000
     const loadModels = async () => {
       const response = await fetch(`${baseURL}/models`, {
         headers: {
