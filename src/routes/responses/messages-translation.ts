@@ -479,7 +479,10 @@ function createToolRegistry(
   payload: ResponsesPayload,
   model: string,
 ): MessagesToolRegistry {
-  const strictCustomTools = !model.toLowerCase().includes("claude")
+  // Claude-family upstream models skip strict custom tools. Match the upstream
+  // model id only, so a provider prefix such as "claude-relay/" does not count.
+  const upstreamModel = parseProviderModelAlias(model)?.model ?? model
+  const strictCustomTools = !upstreamModel.toLowerCase().includes("claude")
   const registry: MessagesToolRegistry = {
     byAlias: new Map(),
     byOriginal: new Map(),

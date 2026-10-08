@@ -779,6 +779,7 @@ describe("Responses Lite to Messages translation", () => {
     { model: "custom/vendor-Claude-model", strict: false },
     { model: "glm-5.3-flash", strict: true },
     { model: "custom/glm-5.3-flash", strict: true },
+    { model: "claude-relay/glm-5.3-flash", strict: true },
   ])("sets custom tool strictness for target $model", ({ model, strict }) => {
     const result = translateResponsesToMessages(
       {
