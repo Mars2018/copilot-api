@@ -200,12 +200,17 @@ export const normalizeClaudeCodeBillingHeaderInSystem = (
   )
 }
 
+const supportsMidSystemMessages = (model: string): boolean =>
+  model.startsWith("gpt")
+  || model.startsWith("codex")
+  || model.startsWith("claude")
+
 export const normalizeSystemMessages = (
   payload: AnthropicMessagesPayload,
 ): void => {
   normalizeClaudeCodeBillingHeaderInSystem(payload)
 
-  if (payload.model.startsWith("gpt") || payload.model.startsWith("codex")) {
+  if (supportsMidSystemMessages(payload.model)) {
     return
   }
 
