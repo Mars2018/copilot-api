@@ -772,6 +772,68 @@ describe("Responses Lite to Messages translation", () => {
     }
   })
 
+  test.each([
+    { model: "claude-sonnet-4.6", strict: false },
+    { model: "claude-opus-4-6", strict: false },
+    { model: "anthropic/claude-sonnet-4.6", strict: false },
+    { model: "custom/vendor-Claude-model", strict: false },
+    { model: "glm-5.3-flash", strict: true },
+    { model: "custom/glm-5.3-flash", strict: true },
+  ])("sets custom tool strictness for target $model", ({ model, strict }) => {
+    const result = translateResponsesToMessages(
+      {
+        model: strict ? "claude-sonnet-4.6" : "public-alias",
+        input: [
+          {
+            role: "developer",
+            type: "additional_tools",
+            tools: [
+              { type: "custom", name: "input_patch" },
+              {
+                type: "namespace",
+                name: "input_tools",
+                tools: [{ type: "custom", name: "apply_patch" }],
+              },
+            ],
+          },
+          { role: "user", type: "message", content: "Update the file" },
+        ],
+        tools: [
+          { type: "custom", name: "apply_patch" },
+          {
+            type: "namespace",
+            name: "workspace",
+            tools: [
+              {
+                type: "namespace",
+                name: "files",
+                tools: [{ type: "custom", name: "apply_patch" }],
+              },
+            ],
+          },
+          { type: "function", name: "getWeather", parameters: null },
+        ],
+      },
+      { model },
+    )
+    const tools = result.messagesPayload.tools
+
+    expect(tools?.map((tool) => tool.name)).toEqual([
+      "apply_patch",
+      "workspace_files__apply_patch",
+      "getWeather",
+      "input_patch",
+      "input_tools__apply_patch",
+    ])
+    for (const tool of tools ?? []) {
+      if (strict && tool.name !== "getWeather") {
+        expect(tool).toHaveProperty("strict", true)
+      } else {
+        expect(tool).not.toHaveProperty("strict")
+      }
+    }
+  })
+
   test("loads custom tools from input.additional_tools", () => {
     const result = translate({
       input: [
@@ -803,7 +865,6 @@ describe("Responses Lite to Messages translation", () => {
           required: ["input"],
           additionalProperties: false,
         },
-        strict: true,
       },
     ])
     expect(result.messagesPayload.tool_choice).toEqual({
@@ -1140,7 +1201,6 @@ describe("Responses Lite to Messages translation", () => {
           required: ["input"],
           additionalProperties: false,
         },
-        strict: true,
       },
     ])
     expect(result.messagesPayload.tool_choice).toEqual({ type: "auto" })

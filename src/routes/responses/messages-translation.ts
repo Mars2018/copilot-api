@@ -172,7 +172,7 @@ export function translateResponsesToMessages(
   options: { model: string; publicModel?: string; toolCallTips?: boolean },
 ): ResponsesToMessagesTranslation {
   removeWebSearchTool(payload)
-  const registry = createToolRegistry(payload)
+  const registry = createToolRegistry(payload, options.model)
   const normalized = normalizeResponsesInput(payload.input)
   const outputFormatInstruction = buildOutputFormatInstruction(
     payload.text?.format,
@@ -475,7 +475,11 @@ function removeWebSearchTool(payload: ResponsesPayload): void {
   payload.tools = payload.tools.filter((tool) => tool.type !== "web_search")
 }
 
-function createToolRegistry(payload: ResponsesPayload): MessagesToolRegistry {
+function createToolRegistry(
+  payload: ResponsesPayload,
+  model: string,
+): MessagesToolRegistry {
+  const strictCustomTools = !model.toLowerCase().includes("claude")
   const registry: MessagesToolRegistry = {
     byAlias: new Map(),
     byOriginal: new Map(),
@@ -483,7 +487,7 @@ function createToolRegistry(payload: ResponsesPayload): MessagesToolRegistry {
   }
 
   for (const tool of payload.tools ?? []) {
-    registerTool(tool, registry)
+    registerTool(tool, registry, strictCustomTools)
   }
 
   if (Array.isArray(payload.input)) {
@@ -491,7 +495,7 @@ function createToolRegistry(payload: ResponsesPayload): MessagesToolRegistry {
       const type = getItemType(item)
       if (type !== "additional_tools") continue
       for (const tool of getArrayField(item, "tools")) {
-        registerTool(tool, registry)
+        registerTool(tool, registry, strictCustomTools)
       }
     }
   }
@@ -502,6 +506,7 @@ function createToolRegistry(payload: ResponsesPayload): MessagesToolRegistry {
 function registerTool(
   tool: unknown,
   registry: MessagesToolRegistry,
+  strictCustomTools: boolean,
   namespaces: Array<string> = [],
 ): void {
   if (!isRecord(tool)) {
@@ -520,7 +525,10 @@ function registerTool(
       )
     }
     for (const child of namespaceTool.tools) {
-      registerTool(child, registry, [...namespaces, namespace])
+      registerTool(child, registry, strictCustomTools, [
+        ...namespaces,
+        namespace,
+      ])
     }
     return
   }
@@ -551,12 +559,14 @@ function registerTool(
         : null,
     },
     registry,
+    strictCustomTools,
   )
 }
 
 function registerMessagesTool(
   registration: ToolRegistration,
   registry: MessagesToolRegistry,
+  strictCustomTools: boolean,
 ): MessagesToolDescriptor {
   const originalKey = createOriginalToolKey(registration)
   const existing = registry.byOriginal.get(originalKey)
@@ -574,7 +584,9 @@ function registerMessagesTool(
       registration.kind === "custom" ?
         CUSTOM_TOOL_INPUT_SCHEMA
       : (registration.parameters ?? { type: "object", properties: {} }),
-    ...(registration.kind === "custom" ? { strict: true } : {}),
+    ...(registration.kind === "custom" && strictCustomTools ?
+      { strict: true }
+    : {}),
   })
   return descriptor
 }
