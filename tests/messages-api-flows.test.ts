@@ -23,7 +23,10 @@ import type {
 } from "~/lib/types/responses"
 
 import { COMPACT_REQUEST } from "~/lib/compact"
+import { installModelsDevCatalog } from "~/lib/models-dev-cache"
 import { closeUsageStore, getTokenUsageEventsPage } from "~/lib/token-usage"
+
+import { modelsDevCatalogFixture } from "./fixtures/models-dev-catalog"
 
 const DB_PATH_ENV = "COPILOT_API_SQLITE_DB_PATH"
 
@@ -162,6 +165,74 @@ test("Messages flow passes the inbound anthropic-version to the Copilot request"
     "client-selected-version",
   )
 })
+
+test.each(["catalog", "live"])(
+  "messages Chat Completions flow preserves PDFs supported by %s metadata",
+  async (source) => {
+    const selectedModel = createModel([])
+    if (source === "live") {
+      selectedModel.capabilities.limits.vision = {
+        supported_media_types: ["application/pdf"],
+      }
+    }
+    installModelsDevCatalog({
+      ...modelsDevCatalogFixture,
+      "github-copilot": {
+        models: {
+          "gpt-test": {
+            id: "gpt-test",
+            modalities: {
+              input: source === "catalog" ? ["text", "pdf"] : ["text"],
+            },
+          },
+        },
+      },
+    })
+
+    try {
+      const response = await handleWithChatCompletions(
+        createContext(),
+        {
+          model: "gpt-test",
+          max_tokens: 128,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "document",
+                  source: {
+                    type: "base64",
+                    media_type: "application/pdf",
+                    data: "pdf-data",
+                  },
+                  title: "report.pdf",
+                },
+              ],
+            },
+          ],
+        },
+        { logger, requestId: "request-pdf", selectedModel },
+      )
+
+      expect(response.status).toBe(200)
+      expect(capturedPayload?.messages[0]).toMatchObject({
+        role: "user",
+        content: [
+          {
+            type: "file",
+            file: {
+              file_data: "data:application/pdf;base64,pdf-data",
+              filename: "report.pdf",
+            },
+          },
+        ],
+      })
+    } finally {
+      installModelsDevCatalog(modelsDevCatalogFixture)
+    }
+  },
+)
 
 test("messages Chat Completions flow adds Copilot cache control to system and latest non-system message", async () => {
   const payload: AnthropicMessagesPayload = {

@@ -1,7 +1,9 @@
 import type { Context, Env } from "hono"
 
+import { resolveEffectiveProviderType } from "~/lib/config"
 import { createHandlerLogger } from "~/lib/logger"
 import { fromClaudeDiscoveryModelId } from "~/lib/claude-models"
+import { getProviderModelPdfSupport } from "~/lib/model-pdf-support"
 import { resolveProviderConfig } from "~/lib/provider-resolver"
 import { createFallbackModel } from "~/lib/provider-model"
 import { getTokenCount } from "~/lib/tokenizer"
@@ -45,18 +47,13 @@ export async function handleProviderCountTokensForProvider(
   }
 
   const modelConfig = providerConfig.models?.[modelId]
-  const translationOptions =
-    (
-      providerConfig.type === "openai-compatible"
-      || providerConfig.type === "openai-responses"
-    ) ?
-      {
-        supportPdf: modelConfig?.supportPdf,
-        toolContentSupportType: modelConfig?.toolContentSupportType ?? [],
-      }
-    : undefined
-
-  const openAIPayload = translateToOpenAI(anthropicPayload, translationOptions)
+  const effectiveType = resolveEffectiveProviderType(providerConfig, modelId)
+  const openAIPayload = translateToOpenAI(anthropicPayload, {
+    supportPdf: getProviderModelPdfSupport(modelId, providerConfig),
+    ...(effectiveType === "openai-compatible" && {
+      toolContentSupportType: modelConfig?.toolContentSupportType ?? [],
+    }),
+  })
 
   const selectedModel = createFallbackModel(modelId)
 

@@ -12,6 +12,7 @@ import { getRawProviderConfig } from "~/lib/config"
 import { getOpencodeModelContextWindow } from "~/lib/config-store"
 import { GITHUB_COPILOT_PROVIDER } from "~/lib/github-copilot-provider"
 import { stripInternalRequestHeaders } from "~/lib/internal-headers"
+import { resolveModelPdfSupport } from "~/lib/model-pdf-support"
 import { findEndpointModel } from "~/lib/models"
 import { getModelsDevModel } from "~/lib/models-dev-cache"
 import type { Reasoning } from "~/lib/types/responses"
@@ -229,15 +230,14 @@ function toOpencodeModel(
   const supportedMediaTypes = stringList(
     getRecordField(limits, "vision")?.supported_media_types,
   )
-  // Explicit model settings override PDF support from provider defaults,
-  // Copilot's live vision media types, and the matching models.dev catalog.
-  const supportPdf =
-    modelConfig?.supportPdf
-    ?? (provider === "codex"
-      || provider === "xai"
-      || (provider === GITHUB_COPILOT_PROVIDER
-        && supportedMediaTypes?.includes("application/pdf") === true)
-      || stringList(catalog?.modalities?.input)?.includes("pdf") === true)
+  const supportPdf = resolveModelPdfSupport(provider, {
+    supportPdf: modelConfig?.supportPdf,
+    supportedMediaTypes,
+    catalogInputModalities: catalog?.modalities?.input,
+    builtinSupportPdf:
+      builtin?.supportPdf
+      ?? builtinProviderModelRegistry.getProviderDefaults(provider)?.supportPdf,
+  })
   const input = [
     ...(stringList(modelConfig?.inputModalities)
       ?? stringList(

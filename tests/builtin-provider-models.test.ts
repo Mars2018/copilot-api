@@ -17,6 +17,30 @@ beforeAll(() => {
 })
 
 describe("builtin provider model registry", () => {
+  test.each(["codex", "xai", " CODEX ", " XAI "])(
+    "provides PDF defaults for %s without adding model IDs",
+    (provider) => {
+      expect(
+        builtinProviderModelRegistry.getProviderDefaults(provider),
+      ).toEqual({ supportPdf: true })
+      expect(
+        builtinProviderModelRegistry.getModelConfig(provider, "unknown-model"),
+      ).toBeUndefined()
+      expect(builtinProviderModelRegistry.getModelIds(provider)).not.toContain(
+        "unknown-model",
+      )
+    },
+  )
+
+  test("keeps PDF defaults unset for other providers", () => {
+    expect(
+      builtinProviderModelRegistry.getProviderDefaults("deepseek"),
+    ).toBeUndefined()
+    expect(
+      builtinProviderModelRegistry.getProviderDefaults("unknown"),
+    ).toBeUndefined()
+  })
+
   test("registers only Grok 4.7 for xAI with its model capabilities", () => {
     expect(builtinProviderModelRegistry.getModelIds("xai")).toEqual([
       "grok-4.7",

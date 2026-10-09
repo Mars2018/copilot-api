@@ -37,6 +37,7 @@ import {
 } from "~/lib/dashscope"
 import { HTTPError } from "~/lib/error"
 import { createHandlerLogger, debugJson, debugLazy } from "~/lib/logger"
+import { getProviderModelPdfSupport } from "~/lib/model-pdf-support"
 import { resolveProviderConfig } from "~/lib/provider-resolver"
 import { writeSSEIfConnected } from "~/lib/sse"
 import { resolveBridgeToolSearchName } from "~/lib/tool-search"
@@ -617,7 +618,7 @@ const createOpenAICompatiblePayload = (
   providerConfig: ResolvedProviderConfig,
 ): ChatCompletionsPayload => {
   const openAIPayload = translateToOpenAI(payload, {
-    supportPdf: modelConfig?.supportPdf,
+    supportPdf: getProviderModelPdfSupport(payload.model, providerConfig),
     toolContentSupportType: modelConfig?.toolContentSupportType ?? [],
   })
 

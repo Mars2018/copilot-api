@@ -10,6 +10,16 @@ import {
 import { Hono } from "hono"
 
 import type { ResolvedProviderConfig } from "~/lib/config"
+import type {
+  ChatCompletionsPayload,
+  FilePart,
+} from "~/lib/types/chat-completions"
+
+import { installModelsDevCatalog } from "~/lib/models-dev-cache"
+import { createFallbackModel } from "~/lib/provider-model"
+import { RICH_TOOL_RESULT_MOVED_TEXT } from "~/routes/messages/non-stream-translation"
+
+import { modelsDevCatalogFixture } from "./fixtures/models-dev-catalog"
 
 const actualConfigModule = await import("~/lib/config")
 const actualTokenUsageModule = await import("~/lib/token-usage")
@@ -17,9 +27,7 @@ const actualTokenUsageModule = await import("~/lib/token-usage")
 let providerConfig: ResolvedProviderConfig | null = null
 let modelMappings: Record<string, string> = {}
 
-interface TokenCountPayload {
-  model: string
-}
+type TokenCountPayload = Pick<ChatCompletionsPayload, "model" | "messages">
 
 interface TokenCountModel {
   capabilities: {
@@ -56,6 +64,7 @@ const { messageRoutes } = await import("~/routes/messages/route")
 const { providerMessageRoutes } = await import(
   "~/routes/provider/messages/route"
 )
+const { responsesRoutes } = await import("~/routes/responses/route")
 const { messagesFlowHandlers } = await import("~/routes/messages/handler")
 const { state } = await import("~/lib/state")
 const { resolveCountTokensModel } = await import(
@@ -102,6 +111,7 @@ const createApp = () => {
   const app = new Hono()
   app.route("/v1/messages", messageRoutes)
   app.route("/:provider/v1/messages", providerMessageRoutes)
+  app.route("/v1/responses", responsesRoutes)
   return app
 }
 
@@ -130,6 +140,351 @@ beforeEach(() => {
 afterEach(() => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
   providerConfig = null
+})
+
+describe("PDF capabilities across provider request routes", () => {
+  const modelId = "org/pdf-model"
+  const pdfData = Buffer.from("%PDF-1.7 fixture").toString("base64")
+  const document = {
+    type: "document",
+    source: {
+      type: "base64",
+      media_type: "application/pdf",
+      data: pdfData,
+    },
+    title: "report.pdf",
+  }
+  const filePart: FilePart = {
+    type: "file",
+    file: {
+      file_data: `data:application/pdf;base64,${pdfData}`,
+      filename: "report.pdf",
+    },
+  }
+  const pdfModel = {
+    id: modelId,
+    modalities: { input: ["text", "pdf"], output: ["text"] },
+  }
+
+  function getUpstreamPayload(): ChatCompletionsPayload {
+    const body = fetchMock.mock.calls[0]?.[1]?.body
+    if (typeof body !== "string") {
+      throw new Error("Expected a serialized Chat Completions request")
+    }
+    return JSON.parse(body) as ChatCompletionsPayload
+  }
+
+  beforeEach(() => {
+    installModelsDevCatalog({
+      ...modelsDevCatalogFixture,
+      "opencode-go": {
+        ...modelsDevCatalogFixture["opencode-go"],
+        models: {
+          ...modelsDevCatalogFixture["opencode-go"].models,
+          [modelId]: pdfModel,
+        },
+      },
+      catalog: {
+        npm: "@ai-sdk/openai-compatible",
+        api: "https://catalog.example/v1",
+        models: { [modelId]: pdfModel },
+      },
+    })
+  })
+
+  afterEach(() => installModelsDevCatalog(modelsDevCatalogFixture))
+
+  test.each([
+    {
+      name: "catalog",
+      modelsDevProviderId: undefined,
+      supportPdf: undefined,
+      expectedPdf: true,
+    },
+    {
+      name: "custom",
+      modelsDevProviderId: "catalog",
+      supportPdf: undefined,
+      expectedPdf: true,
+    },
+    {
+      name: "opencode-go",
+      modelsDevProviderId: undefined,
+      supportPdf: undefined,
+      expectedPdf: true,
+    },
+    {
+      name: "custom",
+      modelsDevProviderId: "catalog",
+      supportPdf: false,
+      expectedPdf: false,
+    },
+    {
+      name: "custom",
+      modelsDevProviderId: undefined,
+      supportPdf: true,
+      expectedPdf: true,
+    },
+    {
+      name: "custom",
+      modelsDevProviderId: undefined,
+      supportPdf: undefined,
+      expectedPdf: false,
+    },
+    {
+      name: "custom",
+      modelsDevProviderId: "catalog",
+      supportPdf: undefined,
+      expectedPdf: true,
+      providerType: "anthropic" as const,
+      modelType: "openai-compatible" as const,
+    },
+    {
+      name: "custom",
+      modelsDevProviderId: "catalog",
+      supportPdf: undefined,
+      expectedPdf: true,
+      providerType: "anthropic" as const,
+    },
+  ])(
+    "resolves PDF capabilities consistently for Messages and token counting: %j",
+    async ({
+      name,
+      modelsDevProviderId,
+      supportPdf,
+      expectedPdf,
+      providerType,
+      modelType,
+    }) => {
+      providerConfig = {
+        ...providerConfig!,
+        name,
+        type: providerType ?? providerConfig!.type,
+        modelsDevProviderId,
+        models: { [modelId]: { supportPdf, type: modelType } },
+      }
+      const app = createApp()
+      for (const prefix of [`/${name}/v1/messages`, "/v1/messages"]) {
+        fetchMock.mockClear()
+        getTokenCount.mockClear()
+        const body = JSON.stringify({
+          model: prefix === "/v1/messages" ? `${name}/${modelId}` : modelId,
+          max_tokens: 128,
+          messages: [{ role: "user", content: [document] }],
+        })
+        const request = {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+        }
+
+        const response = await app.request(prefix, request)
+        expect(response.status).toBe(200)
+        const upstreamPayload = getUpstreamPayload()
+        expect(upstreamPayload.model).toBe(modelId)
+        expect(upstreamPayload.messages[0].content).toEqual(
+          expectedPdf ?
+            [filePart]
+          : [
+              {
+                type: "text",
+                text: "PDF/document content is not supported by this Chat Completions upstream. Use the available text extracted from the document.",
+              },
+            ],
+        )
+
+        const countResponse = await app.request(
+          `${prefix}/count_tokens`,
+          request,
+        )
+        expect(countResponse.status).toBe(200)
+        expect(await countResponse.json()).toEqual({ input_tokens: 42 })
+        expect(getTokenCount.mock.calls[0]?.[0].messages).toEqual(
+          upstreamPayload.messages,
+        )
+      }
+    },
+  )
+
+  test.each([
+    {
+      providerType: "openai-compatible",
+      modelType: undefined,
+      expectedToolPdf: true,
+    },
+    {
+      providerType: "anthropic",
+      modelType: undefined,
+      expectedToolPdf: false,
+    },
+    {
+      providerType: "openai-responses",
+      modelType: undefined,
+      expectedToolPdf: false,
+    },
+    {
+      providerType: "anthropic",
+      modelType: "openai-compatible",
+      expectedToolPdf: true,
+    },
+    {
+      providerType: "openai-compatible",
+      modelType: "anthropic",
+      expectedToolPdf: false,
+    },
+  ] as const)(
+    "uses PDF tool content only for the effective Chat Completions protocol: %j",
+    async ({ providerType, modelType, expectedToolPdf }) => {
+      providerConfig = {
+        ...providerConfig!,
+        name: "catalog",
+        type: providerType,
+        models: {
+          [modelId]: { type: modelType, toolContentSupportType: ["pdf"] },
+        },
+      }
+
+      const response = await createApp().request(
+        "/catalog/v1/messages/count_tokens",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: modelId,
+            max_tokens: 128,
+            messages: [
+              {
+                role: "assistant",
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "read-pdf",
+                    name: "read_file",
+                    input: { path: "report.pdf" },
+                  },
+                ],
+              },
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "tool_result",
+                    tool_use_id: "read-pdf",
+                    content: [document],
+                  },
+                ],
+              },
+            ],
+          }),
+        },
+      )
+
+      expect(response.status).toBe(200)
+      const messages = getTokenCount.mock.calls[0]?.[0].messages
+      expect(messages?.find((message) => message.role === "tool")).toEqual({
+        role: "tool",
+        tool_call_id: "read-pdf",
+        content: expectedToolPdf ? [filePart] : RICH_TOOL_RESULT_MOVED_TEXT,
+      })
+      if (!expectedToolPdf) {
+        expect(messages?.at(-1)).toEqual({
+          role: "user",
+          content: [
+            { type: "text", text: "Tool result for read-pdf:" },
+            filePart,
+          ],
+        })
+      }
+    },
+  )
+
+  test("preserves an OpenCode Responses PDF through the Messages and Chat Completions adapters", async () => {
+    providerConfig = {
+      ...providerConfig!,
+      name: "custom",
+      modelsDevProviderId: "catalog",
+      models: { [modelId]: {} },
+    }
+
+    const response = await createApp().request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", "user-agent": "opencode" },
+      body: JSON.stringify({
+        model: `custom/${modelId}`,
+        input: [
+          { role: "user", content: [{ type: "input_file", ...filePart.file }] },
+        ],
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const upstreamPayload = getUpstreamPayload()
+    expect(upstreamPayload.messages[0].content).toEqual([filePart])
+  })
+
+  test.each(["catalog", "live", "disabled"])(
+    "applies %s Copilot PDF capabilities before token counting",
+    async (source) => {
+      installModelsDevCatalog({
+        ...modelsDevCatalogFixture,
+        "github-copilot": {
+          models: {
+            [modelId]: {
+              ...pdfModel,
+              modalities: {
+                input: source === "live" ? ["text"] : ["text", "pdf"],
+              },
+            },
+          },
+        },
+      })
+      providerConfig = {
+        ...providerConfig!,
+        name: "github-copilot",
+        models: {
+          [modelId]: { supportPdf: source === "disabled" ? false : undefined },
+        },
+      }
+      const originalModels = state.models
+      const selectedModel = createFallbackModel(modelId)
+      if (source === "live") {
+        selectedModel.capabilities.limits.vision = {
+          supported_media_types: ["application/pdf"],
+        }
+      }
+      state.models = { object: "list", data: [selectedModel] }
+
+      try {
+        const response = await createApp().request(
+          "/v1/messages/count_tokens",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              model: modelId,
+              max_tokens: 128,
+              messages: [{ role: "user", content: [document] }],
+            }),
+          },
+        )
+
+        expect(response.status).toBe(200)
+        const content = getTokenCount.mock.calls[0]?.[0].messages[0].content
+        expect(content).toEqual(
+          source === "disabled" ?
+            [
+              {
+                type: "text",
+                text: "PDF/document content is not supported by this Chat Completions upstream. Use the available text extracted from the document.",
+              },
+            ]
+          : [filePart],
+        )
+      } finally {
+        state.models = originalModels
+      }
+    },
+  )
 })
 
 describe("provider/model aliases on top-level messages routes", () => {

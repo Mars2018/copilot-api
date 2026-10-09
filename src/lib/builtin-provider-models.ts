@@ -18,6 +18,7 @@ export interface BuiltinProviderModelConfig {
   maxOutputTokens?: number
   pricing?: TokenUsagePricingConfig
   reasoningEfforts?: Array<CodexReasoningEffort>
+  supportPdf?: boolean
   // Message field carrying assistant thinking text in upstream requests,
   // for models that do not follow the default "reasoning_content"
   // convention (e.g. opencode-go hy3/hy4 use the OpenRouter-style
@@ -49,6 +50,14 @@ const CODEX_LUNA_PRICING: TokenUsagePricingConfig = {
 }
 
 export class BuiltinProviderModelRegistry {
+  private static readonly providerDefaults: Record<
+    string,
+    Readonly<BuiltinProviderModelConfig>
+  > = {
+    codex: { supportPdf: true },
+    xai: { supportPdf: true },
+  }
+
   private static readonly catalog: BuiltinProviderModelCatalog = {
     xai: {
       "grok-4.7": {
@@ -428,6 +437,14 @@ export class BuiltinProviderModelRegistry {
     const provider = this.normalizeKey(providerName)
     if (provider === "opencode-go") return getOpencodeGoModelIds()
     return Object.keys(this.modelCatalog[provider] ?? {})
+  }
+
+  getProviderDefaults(
+    providerName: string,
+  ): Readonly<BuiltinProviderModelConfig> | undefined {
+    return BuiltinProviderModelRegistry.providerDefaults[
+      this.normalizeKey(providerName)
+    ]
   }
 
   private normalizeKey(value: string): string {
